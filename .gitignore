@@ -1,0 +1,10 @@
+# Production
+build/
+.cache/
+
+# Editor directories and files
+.vscode/
+.DS_Store
+
+# OS
+Thumbs.db
