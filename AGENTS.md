@@ -155,10 +155,12 @@ Audio recorder and player are defined as abstract C++ interfaces.
 Platform-specific implementations live in separate directories:
 
 ```
-io/audio/src/audio_device/
+io/audio/audio_device/
 ├── audio_recorder.h          # abstract interface
 ├── audio_player.h            # abstract interface
 ├── audio_device.h            # facade (concrete, owns recorder + player)
+├── sample_format.h           # SampleFormat enum (kInt16, kFloat32)
+├── audio_buffer.h            # lock-free ring buffer (template, internal)
 ├── port_audio/               # desktop: macOS, Linux, Windows
 ├── oboe/                     # Android
 └── core_audio/               # iOS

@@ -1,0 +1,54 @@
+#pragma once
+
+#include <memory>
+#include <string>
+
+#include "context/config.h"
+#include "context/context_strategy.h"
+#include "controller/config.h"
+#include "controller/controller.h"
+#include "controller/types.h"
+#include "interfaces/audit_sink.h"
+#include "interfaces/io_bridge.h"
+#include "interfaces/llm_client.h"
+#include "interfaces/memory_store.h"
+#include "policy/config.h"
+#include "policy/policy_layer.h"
+
+namespace shizuru::core {
+
+// Owns the lifecycle of a single agent session.
+// Wires Controller, ContextStrategy, and PolicyLayer together.
+class AgentSession {
+ public:
+  AgentSession(const std::string& session_id,
+               ControllerConfig ctrl_config,
+               ContextConfig ctx_config,
+               PolicyConfig pol_config,
+               std::unique_ptr<LlmClient> llm,
+               std::unique_ptr<IoBridge> io,
+               std::unique_ptr<MemoryStore> memory,
+               std::unique_ptr<AuditSink> audit);
+
+  ~AgentSession();
+
+  void Start();
+  void Shutdown();
+  void EnqueueObservation(Observation obs);
+  State GetState() const;
+
+  const std::string& SessionId() const { return session_id_; }
+  Controller& GetController() { return controller_; }
+  ContextStrategy& GetContext() { return context_; }
+  PolicyLayer& GetPolicy() { return policy_; }
+
+ private:
+  std::string session_id_;
+  std::unique_ptr<MemoryStore> memory_;
+  std::unique_ptr<AuditSink> audit_;
+  ContextStrategy context_;
+  PolicyLayer policy_;
+  Controller controller_;
+};
+
+}  // namespace shizuru::core

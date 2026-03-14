@@ -1,0 +1,26 @@
+CompileFlags:
+  CompilationDatabase: build
+  Add:
+    - "-std=c++17"
+  Remove:
+    - "-W*"
+
+Diagnostics:
+  UnusedIncludes: Strict
+  ClangTidy:
+    Add:
+      - modernize-*
+      - bugprone-*
+      - readability-*
+      - performance-*
+    Remove:
+      - modernize-use-trailing-return-type
+      - readability-magic-numbers
+
+InlayHints:
+  Enabled: true
+  ParameterNames: true
+  DeducedTypes: true
+
+Hover:
+  ShowAKA: true
