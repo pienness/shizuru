@@ -28,6 +28,8 @@ class OpenAiClient : public core::LlmClient {
   void Cancel() override;
 
  private:
+  static constexpr char MODULE_NAME[] = "LLM";
+
   // Build the Authorization header value.
   std::string AuthHeader() const;
 

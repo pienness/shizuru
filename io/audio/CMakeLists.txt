@@ -23,7 +23,3 @@ target_include_directories(shizuru_audio
 target_link_libraries(shizuru_audio
   PUBLIC portaudio_static
 )
-
-# Example
-add_executable(audio_example examples/main.cpp)
-target_link_libraries(audio_example PRIVATE shizuru_audio)

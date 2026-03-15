@@ -13,6 +13,7 @@
 #include "llm/config.h"
 #include "policy/config.h"
 #include "session/session.h"
+#include "async_logger.h"
 
 namespace shizuru::runtime {
 
@@ -22,6 +23,7 @@ struct RuntimeConfig {
   core::ContextConfig context;
   core::PolicyConfig policy;
   services::OpenAiConfig llm;
+  core::LoggerConfig logger;
 
   // If true, when the latest user input is audio, AgentRuntime will try to
   // synthesize assistant text replies into audio via a registered TTS tool.

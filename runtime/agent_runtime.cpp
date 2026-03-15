@@ -51,7 +51,9 @@ std::string ExtractTextFromToolOutput(const std::string& output) {
 
 AgentRuntime::AgentRuntime(RuntimeConfig config,
                            services::ToolRegistry& tools)
-    : config_(std::move(config)), tools_(tools) {}
+    : config_(std::move(config)), tools_(tools) {
+  core::InitLogger(config_.logger);
+}
 
 AgentRuntime::~AgentRuntime() {
   if (session_) {
@@ -331,6 +333,7 @@ void AgentRuntime::Shutdown() {
     session_.reset();
   }
   last_input_was_audio_.store(false);
+  core::ShutdownLogger();
 }
 
 core::State AgentRuntime::GetState() const {

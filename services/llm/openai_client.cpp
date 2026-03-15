@@ -1,6 +1,5 @@
 #include "llm/openai_client.h"
 
-#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -8,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "llm/json_parser.h"
+#include "async_logger.h"
 
 namespace shizuru::services {
 
@@ -30,6 +30,9 @@ core::LlmResult OpenAiClient::Submit(const core::ContextWindow& context) {
 
   std::string body = SerializeRequest(context, config_);
 
+  LOG_DEBUG("[{}] Submit to {}{}", MODULE_NAME, SchemeHost(), config_.api_path);
+  LOG_DEBUG("[{}] Payload: {}", MODULE_NAME, body);
+
   httplib::Client cli(SchemeHost());
   cli.set_connection_timeout(config_.connect_timeout);
   cli.set_read_timeout(config_.read_timeout);
@@ -42,14 +45,18 @@ core::LlmResult OpenAiClient::Submit(const core::ContextWindow& context) {
   auto res = cli.Post(config_.api_path, headers, body, "application/json");
 
   if (!res) {
+    LOG_ERROR("[{}] Submit failed: no response", MODULE_NAME);
     throw std::runtime_error("HTTP request failed: " +
                              httplib::to_string(res.error()));
   }
 
   if (res->status != 200) {
+    LOG_WARN("[{}] Submit status {}: {}", MODULE_NAME, res->status, res->body);
     throw std::runtime_error("LLM API returned status " +
                              std::to_string(res->status) + ": " + res->body);
   }
+
+  LOG_DEBUG("[{}] Submit response: {}", MODULE_NAME, res->body);
 
   return ParseResponse(res->body);
 }
@@ -66,6 +73,9 @@ core::LlmResult OpenAiClient::SubmitStreaming(
   // Request usage stats in the final chunk.
   body_json["stream_options"] = {{"include_usage", true}};
   std::string body = body_json.dump();
+
+  LOG_DEBUG("[{}] SubmitStreaming to {}{}", MODULE_NAME, SchemeHost(), config_.api_path);
+  LOG_DEBUG("[{}] Payload: {}", MODULE_NAME, body);
 
   httplib::Client cli(SchemeHost());
   cli.set_connection_timeout(config_.connect_timeout);
@@ -135,15 +145,18 @@ core::LlmResult OpenAiClient::SubmitStreaming(
   auto res = cli.send(req);
 
   if (cancel_requested_.load()) {
+    LOG_WARN("[{}] SubmitStreaming cancelled by user", MODULE_NAME);
     throw std::runtime_error("Request cancelled");
   }
 
   if (!res) {
+    LOG_ERROR("[{}] SubmitStreaming failed: no response", MODULE_NAME);
     throw std::runtime_error("HTTP streaming request failed: " +
                              httplib::to_string(res.error()));
   }
 
   if (res->status != 200) {
+    LOG_WARN("[{}] SubmitStreaming status {}", MODULE_NAME, res->status);
     throw std::runtime_error("LLM API returned status " +
                              std::to_string(res->status));
   }
@@ -171,6 +184,12 @@ core::LlmResult OpenAiClient::SubmitStreaming(
       result.candidate.type = core::ActionType::kContinue;
     }
   }
+
+  LOG_DEBUG("[{}] SubmitStreaming result: type={}, text=\"{}\"", MODULE_NAME,
+            static_cast<int>(result.candidate.type),
+            result.candidate.type == core::ActionType::kToolCall
+                ? result.candidate.action_name
+                : result.candidate.response_text);
 
   return result;
 }

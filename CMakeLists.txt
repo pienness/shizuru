@@ -16,9 +16,11 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
+add_subdirectory(utils)
 add_subdirectory(core)
 add_subdirectory(io/audio)
 add_subdirectory(services)
 add_subdirectory(runtime)
+add_subdirectory(examples)
 add_subdirectory(tests/agent)
 add_subdirectory(tests/services)

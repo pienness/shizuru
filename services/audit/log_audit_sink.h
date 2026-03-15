@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "interfaces/audit_sink.h"
-#include "logging/logger.h"
+#include "async_logger.h"
 
 namespace shizuru::services {
 

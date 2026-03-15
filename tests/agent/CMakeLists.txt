@@ -26,7 +26,6 @@ add_executable(controller_test
 target_link_libraries(controller_test
   PRIVATE shizuru_core
   PRIVATE GTest::gtest_main
-  PRIVATE rapidcheck
   PRIVATE rapidcheck_gtest
 )
 target_include_directories(controller_test
@@ -44,7 +43,6 @@ add_executable(context_strategy_test
 target_link_libraries(context_strategy_test
   PRIVATE shizuru_core
   PRIVATE GTest::gtest_main
-  PRIVATE rapidcheck
   PRIVATE rapidcheck_gtest
 )
 target_include_directories(context_strategy_test
@@ -62,7 +60,6 @@ add_executable(policy_layer_test
 target_link_libraries(policy_layer_test
   PRIVATE shizuru_core
   PRIVATE GTest::gtest_main
-  PRIVATE rapidcheck
   PRIVATE rapidcheck_gtest
 )
 target_include_directories(policy_layer_test

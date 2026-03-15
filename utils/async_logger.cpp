@@ -1,4 +1,4 @@
-#include "logging/logger.h"
+#include "async_logger.h"
 
 #include <spdlog/async.h>
 #include <spdlog/sinks/rotating_file_sink.h>
@@ -54,6 +54,14 @@ void ShutdownLogger() {
 }
 
 std::shared_ptr<spdlog::logger> GetLogger() {
+  if (!g_logger) {
+    // Fallback: sync stderr logger for debug/test scenarios without InitLogger().
+    // Use get() first to avoid duplicate-registration exception.
+    g_logger = spdlog::get("shizuru");
+    if (!g_logger) {
+      g_logger = spdlog::stderr_color_mt("shizuru");
+    }
+  }
   return g_logger;
 }
 

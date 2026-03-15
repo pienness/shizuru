@@ -4,7 +4,6 @@ add_library(shizuru_core STATIC
   context/context_strategy.cpp
   policy/policy_layer.cpp
   session/session.cpp
-  logging/logger.cpp
 )
 
 target_include_directories(shizuru_core
@@ -12,5 +11,5 @@ target_include_directories(shizuru_core
 )
 
 target_link_libraries(shizuru_core
-  PUBLIC spdlog::spdlog
+  PUBLIC shizuru_utils
 )
