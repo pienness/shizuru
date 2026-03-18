@@ -1,58 +1,49 @@
-#include <cstdio>
-#include <cstdint>
-#include <thread>
 #include <chrono>
+#include <cstdio>
 #include <memory>
-#include <vector>
+#include <thread>
 
 #include "audio_device/audio_device.h"
-#include "audio_device/port_audio/pa_recorder.h"
+#include "audio_device/audio_frame.h"
 #include "audio_device/port_audio/pa_player.h"
+#include "audio_device/port_audio/pa_recorder.h"
 
 int main() {
   try {
-    constexpr double kSampleRate = 16000.0;
-    constexpr size_t kChannels = 1;
-    constexpr size_t kFramesPerBuffer = 480;
-
-    // Sample format is set via config enum — backend handles the rest.
-    auto format = shizuru::io::SampleFormat::kInt16;
+    constexpr int    kSampleRate       = 16000;
+    constexpr size_t kChannels         = 1;
+    constexpr size_t kFramesPerBuffer  = 320;  // 20ms at 16kHz
 
     shizuru::io::RecorderConfig rec_cfg;
-    rec_cfg.sample_rate = kSampleRate;
-    rec_cfg.channels = kChannels;
+    rec_cfg.sample_rate       = kSampleRate;
+    rec_cfg.channel_count     = kChannels;
     rec_cfg.frames_per_buffer = kFramesPerBuffer;
-    rec_cfg.format = format;
 
     shizuru::io::PlayerConfig play_cfg;
-    play_cfg.sample_rate = kSampleRate;
-    play_cfg.channels = kChannels;
+    play_cfg.sample_rate       = kSampleRate;
+    play_cfg.channel_count     = kChannels;
     play_cfg.frames_per_buffer = kFramesPerBuffer;
-    play_cfg.format = format;
 
     shizuru::io::AudioDevice device(
         std::make_unique<shizuru::io::PaRecorder>(rec_cfg),
         std::make_unique<shizuru::io::PaPlayer>(play_cfg));
 
-    std::printf("Format: %s\n",
-                format == shizuru::io::SampleFormat::kFloat32 ? "float32" : "s16le");
+    std::printf("Format: s16le, %d Hz, %zu ch\n", kSampleRate, kChannels);
     std::printf("Starting 5s loopback (mic -> speaker)...\n");
     device.StartRecording();
     device.StartPlayout();
 
-    size_t bytes_per_sample = shizuru::io::BytesPerSample(format);
-    std::vector<uint8_t> buf(kFramesPerBuffer * kChannels * bytes_per_sample);
-    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    shizuru::io::AudioFrame frame;
+    frame.sample_rate   = kSampleRate;
+    frame.channel_count = kChannels;
+    frame.sample_count  = kFramesPerBuffer;
 
+    auto end = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (std::chrono::steady_clock::now() < end) {
-      size_t read = device.Recorder().Read(buf.data(), kFramesPerBuffer);
+      const size_t read = device.Recorder().Read(frame);
       if (read > 0) {
-        static auto *fp = fopen("a.pcm", "wbe");
-        if (fp) {
-          fwrite(buf.data(), 
-                          1, read * bytes_per_sample, fp);
-        }
-        device.Player().Write(buf.data(), read);
+        frame.sample_count = read;
+        device.Player().Write(frame);
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }

@@ -1,17 +1,16 @@
 #pragma once
 
 #include <cstddef>
-#include "audio_device/sample_format.h"
+#include "audio_device/audio_frame.h"
 
 namespace shizuru::io {
 
 struct PlayerConfig {
-  int device_id = -1;       // -1 = default output
-  double sample_rate = 16000.0;
-  size_t channels = 1;
-  size_t frames_per_buffer = 480;  // 30ms at 16kHz
-  size_t buffer_capacity_frames = 16000;  // 1s ring buffer
-  SampleFormat format = SampleFormat::kInt16;
+  int    device_id            = -1;    // -1 = default output
+  int    sample_rate          = 16000;
+  size_t channel_count        = 1;
+  size_t frames_per_buffer    = 320;   // 20ms at 16kHz
+  size_t buffer_capacity_samples = 16000; // 1s ring buffer at 16kHz
 };
 
 class AudioPlayer {
@@ -20,12 +19,14 @@ class AudioPlayer {
 
   virtual void Start() = 0;
   virtual void Stop() = 0;
-  virtual bool IsPlaying() const = 0;
+  [[nodiscard]] virtual bool IsPlaying() const = 0;
 
-  // Write frames from caller-provided buffer.
-  virtual size_t Write(const void* data, size_t frame_count) = 0;
+  // Write one audio frame into the playout buffer.
+  // Returns the number of samples per channel actually written.
+  virtual size_t Write(const AudioFrame& frame) = 0;
 
-  virtual size_t Buffered() const = 0;
+  // Number of frames currently buffered (samples per channel).
+  [[nodiscard]] virtual size_t Buffered() const = 0;
 };
 
 }  // namespace shizuru::io

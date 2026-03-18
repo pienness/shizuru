@@ -73,16 +73,15 @@ int main(int argc, char* argv[]) {
     shizuru::services::ElevenLabsClient tts(tts_cfg);
 
     // ── Audio player — must match TTS output format ───────────────────────
-    constexpr double kSampleRate      = 16000.0;
+    constexpr int    kSampleRate      = 16000;
     constexpr size_t kChannels        = 1;
     constexpr size_t kFramesPerBuffer = 320;  // 20ms at 16kHz
 
     shizuru::io::PlayerConfig play_cfg;
-    play_cfg.sample_rate            = kSampleRate;
-    play_cfg.channels               = kChannels;
-    play_cfg.frames_per_buffer      = kFramesPerBuffer;
-    play_cfg.format                 = shizuru::io::SampleFormat::kInt16;
-    play_cfg.buffer_capacity_frames = static_cast<size_t>(kSampleRate) * 10;
+    play_cfg.sample_rate             = kSampleRate;
+    play_cfg.channel_count           = kChannels;
+    play_cfg.frames_per_buffer       = kFramesPerBuffer;
+    play_cfg.buffer_capacity_samples = static_cast<size_t>(kSampleRate) * 10;
 
     auto player = std::make_unique<shizuru::io::PaPlayer>(play_cfg);
     player->Start();
@@ -110,9 +109,13 @@ int main(int argc, char* argv[]) {
       size_t offset = 0;
 
       if (has_carry) {
-        // Complete the split sample: [carry | src[0]]
         uint8_t pair[2] = {carry, src[0]};
-        player->Write(pair, 1);  // 1 frame = 2 bytes for s16le mono
+        shizuru::io::AudioFrame f;
+        f.sample_rate   = kSampleRate;
+        f.channel_count = kChannels;
+        f.sample_count  = 1;
+        std::memcpy(f.data, pair, 2);
+        player->Write(f);
         has_carry = false;
         offset = 1;
       }
@@ -120,7 +123,12 @@ int main(int argc, char* argv[]) {
       const size_t remaining = bytes - offset;
       const size_t frames    = remaining / sizeof(int16_t);
       if (frames > 0) {
-        player->Write(src + offset, frames);
+        shizuru::io::AudioFrame f;
+        f.sample_rate   = kSampleRate;
+        f.channel_count = kChannels;
+        f.sample_count  = frames;
+        std::memcpy(f.data, src + offset, frames * sizeof(int16_t));
+        player->Write(f);
       }
 
       if ((remaining % sizeof(int16_t)) != 0) {
@@ -131,7 +139,8 @@ int main(int argc, char* argv[]) {
 
     std::printf("Received %zu bytes (%.1f s). Draining...\n",
                 total_bytes,
-                static_cast<double>(total_bytes) / (kSampleRate * sizeof(int16_t)));
+                static_cast<double>(total_bytes) /
+                    (static_cast<double>(kSampleRate) * sizeof(int16_t)));
 
     // ── Drain: wait until the ring buffer is empty ────────────────────────
     while (player->Buffered() > 0) {
