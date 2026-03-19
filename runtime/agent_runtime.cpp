@@ -9,6 +9,9 @@
 #include "llm/openai_client.h"
 #include "memory/in_memory_store.h"
 #include "audit/log_audit_sink.h"
+#include "baidu/asr/baidu_asr_client.h"
+#include "baidu/tts/baidu_tts_client.h"
+#include "baidu/token_manager.h"
 
 namespace shizuru::runtime {
 
@@ -53,6 +56,23 @@ AgentRuntime::AgentRuntime(RuntimeConfig config,
                            services::ToolRegistry& tools)
     : config_(std::move(config)), tools_(tools) {
   core::InitLogger(config_.logger);
+  InitBaiduClients();
+}
+
+void AgentRuntime::InitBaiduClients() {
+  if (!config_.baidu.has_value()) {
+    return;
+  }
+  const auto& bc = config_.baidu.value();
+  if (bc.api_key.empty() || bc.secret_key.empty()) {
+    LOG_WARN("[{}] Baidu config present but api_key or secret_key is empty, "
+             "skipping Baidu client init", MODULE_NAME);
+    return;
+  }
+  LOG_INFO("[{}] Initializing Baidu voice clients", MODULE_NAME);
+  baidu_token_mgr_ = std::make_shared<services::BaiduTokenManager>(bc);
+  baidu_tts_ = std::make_unique<services::BaiduTtsClient>(bc, baidu_token_mgr_);
+  baidu_asr_ = std::make_unique<services::BaiduAsrClient>(bc, baidu_token_mgr_);
 }
 
 AgentRuntime::~AgentRuntime() {
@@ -220,7 +240,16 @@ std::string AgentRuntime::TranscribeAudioToText(const std::string& payload,
     stt_fn = tools_.Find("asr");
   }
   if (!stt_fn) {
-    // TODO(voice-tools): register "stt" or "asr" tool implementation.
+    // Fallback to built-in Baidu ASR client.
+    if (baidu_asr_) {
+      LOG_INFO("[{}] Using built-in Baidu ASR for transcription", MODULE_NAME);
+      try {
+        return baidu_asr_->Transcribe(payload, mime_type);
+      } catch (const std::exception& e) {
+        LOG_ERROR("[{}] Baidu ASR failed: {}", MODULE_NAME, e.what());
+        return "";
+      }
+    }
     return "";
   }
 
@@ -256,7 +285,8 @@ bool AgentRuntime::ShouldSynthesizeAudio(
   if (response.response_text.empty()) {
     return false;
   }
-  return tools_.Has("tts") || tools_.Has("text_to_speech");
+  return tools_.Has("tts") || tools_.Has("text_to_speech") ||
+         baidu_tts_ != nullptr;
 }
 
 RuntimeOutput AgentRuntime::MaybeSynthesizeAudio(
@@ -269,7 +299,21 @@ RuntimeOutput AgentRuntime::MaybeSynthesizeAudio(
     tts_fn = tools_.Find("text_to_speech");
   }
   if (!tts_fn) {
-    // TODO(voice-tools): register "tts" or "text_to_speech" tool implementation.
+    // Fallback to built-in Baidu TTS client.
+    if (baidu_tts_) {
+      LOG_INFO("[{}] Using built-in Baidu TTS for synthesis", MODULE_NAME);
+      try {
+        std::string mime;
+        std::string audio = baidu_tts_->Synthesize(response.response_text, mime);
+        if (!audio.empty()) {
+          output.audio_payload = std::move(audio);
+          output.audio_mime_type = std::move(mime);
+          output.has_audio = true;
+        }
+      } catch (const std::exception& e) {
+        LOG_ERROR("[{}] Baidu TTS failed: {}", MODULE_NAME, e.what());
+      }
+    }
     return output;
   }
 

@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 // Windows <windows.h> defines SendMessage as a macro expanding to
@@ -20,9 +21,16 @@
 #include "controller/types.h"
 #include "io/tool_registry.h"
 #include "llm/config.h"
+#include "baidu/baidu_config.h"
 #include "policy/config.h"
 #include "session/session.h"
 #include "async_logger.h"
+
+namespace shizuru::services {
+class BaiduTokenManager;
+class BaiduTtsClient;
+class BaiduAsrClient;
+}  // namespace shizuru::services
 
 namespace shizuru::runtime {
 
@@ -37,6 +45,10 @@ struct RuntimeConfig {
   // If true, when the latest user input is audio, AgentRuntime will try to
   // synthesize assistant text replies into audio via a registered TTS tool.
   bool auto_tts_on_audio_input = true;
+
+  // Optional Baidu voice config. When set, built-in ASR/TTS clients are
+  // created as fallback when no external tool is registered.
+  std::optional<services::BaiduConfig> baidu;
 };
 
 // Final output emitted by AgentRuntime for a user turn.
@@ -103,11 +115,18 @@ class AgentRuntime {
 
   bool ShouldSynthesizeAudio(const core::ActionCandidate& response) const;
 
+  void InitBaiduClients();
+
   static constexpr char MODULE_NAME[] = "Runtime";
 
   RuntimeConfig config_;
   services::ToolRegistry& tools_;
   std::unique_ptr<core::AgentSession> session_;
+
+  // Built-in Baidu voice clients (created when config_.baidu is set).
+  std::shared_ptr<services::BaiduTokenManager> baidu_token_mgr_;
+  std::unique_ptr<services::BaiduTtsClient> baidu_tts_;
+  std::unique_ptr<services::BaiduAsrClient> baidu_asr_;
 
   std::atomic<bool> last_input_was_audio_{false};
 
