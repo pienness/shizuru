@@ -7,8 +7,8 @@ A cross-platform voice conversation agent built in C++17, with a Flutter UI and 
 - CMake 3.20+
 - C++17 compiler (clang or gcc)
 - Ninja (recommended)
-- OpenSSL (for HTTPS — already present on most systems)
-- PortAudio (for audio on desktop)
+- OpenSSL
+- PortAudio (desktop audio)
 
 On macOS:
 ```bash
@@ -22,22 +22,20 @@ cmake -B build -G Ninja
 cmake --build build
 ```
 
-## Run the example
+## Run
 
 ```bash
-# No LLM needed — uses a built-in mock server
+# Built-in mock LLM server — no API key needed
 ./build/examples/tool_call_example
 
-# Connect to a local Ollama instance
+# Local Ollama
 ./build/examples/tool_call_example http://localhost:11434 "" qwen3:8b /api/chat
 
-# Connect to OpenAI
+# OpenAI
 ./build/examples/tool_call_example https://api.openai.com sk-your-key gpt-4o
 ```
 
-The example runs an interactive agent loop with a `get_weather` tool. Type a message, press Enter. Type `quit` or Ctrl+D to exit.
-
-## Run tests
+## Test
 
 ```bash
 ctest --test-dir build
@@ -47,24 +45,31 @@ ctest --test-dir build
 
 ```
 core/        Agent framework: controller, context strategy, policy, session
-services/    Concrete implementations: LLM client, tool dispatcher, memory, audit
-io/audio/    Audio subsystem: abstract interfaces + PortAudio backend (desktop)
-runtime/     AgentRuntime: assembles all components, manages session lifecycle
+services/    Vendor implementations: LLM, ASR, TTS, tools, memory
+             Layout: services/<module>/<vendor>/
+io/          IoDevice abstraction + audio device interfaces
+runtime/     AgentRuntime (device bus), CoreDevice, RouteTable
 examples/    Runnable examples
 tests/       Unit and property-based tests
 ```
 
-## Architecture overview
+## Architecture
 
-The agent is modeled after an OS:
+The runtime is a device bus. Every component — including the agent session — is an `IoDevice`. Data flows as typed `DataFrame` packets routed by a `RouteTable`.
 
-- Controller — state machine, drives the reasoning loop
-- LLM client — OpenAI-compatible HTTP + SSE streaming
-- Context strategy — builds the prompt window from memory
-- Policy layer — permission checks and audit before every tool call
-- IO bridge — tool registry and dispatcher
+```
+User input
+    │  text/plain
+    ▼
+CoreDevice (AgentSession adapter)
+    │  text/plain
+    ▼
+app_output sink → OutputCallback
+```
 
-Voice capabilities (VAD, ASR, TTS) are registered as tools, not hard-wired into the pipeline. The controller decides when to invoke them.
+Audio and voice components (VAD, ASR, TTS) are registered as `IoDevice` instances and connected via routes. DMA routes (`requires_control_plane = false`) bypass the LLM loop for low-latency audio streaming.
+
+The agent core is modeled after an OS: controller as state machine, LLM as CPU, context strategy as memory manager, policy layer as permission boundary.
 
 ## Cross-platform
 
@@ -75,4 +80,4 @@ Voice capabilities (VAD, ASR, TTS) are registered as tools, not hard-wired into 
 | Android       | Oboe               | Flutter |
 | iOS           | CoreAudio          | Flutter |
 
-The C++ core is shared across all platforms. Platform-specific code lives behind abstract interfaces.
+C++ core is shared across all platforms. Platform-specific code lives behind abstract interfaces.

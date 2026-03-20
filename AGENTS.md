@@ -35,9 +35,9 @@ Platform-specific code is isolated behind abstract interfaces (e.g., audio backe
 ┌──────────────▼──────────────────────────┐
 │         C++ Core (all platforms)        │
 │  core/    controller, context, policy   │
-│  llm/     OpenAI compatible client      │
-│  io/      audio, observation, action    │
-│  runtime/ control plane, data plane     │
+│  services/ LLM, ASR, TTS, tools, memory │
+│  io/      IoDevice abstraction + audio  │
+│  runtime/ device bus, routing, session  │
 └─────────────────────────────────────────┘
 ```
 
@@ -85,6 +85,28 @@ flowchart TB
 6. Feed execution results back through IO.Observation.
 7. Repeat until stop condition is met, then return final response.
 
+## Runtime IO Architecture (Implemented)
+
+The runtime is built around a device bus model. All components — including the agent session itself — are `IoDevice` instances connected by a `RouteTable`.
+
+### Key abstractions
+
+- `IoDevice` (`io/io_device.h`) — abstract interface with typed input/output ports. Every component that produces or consumes data implements this.
+- `DataFrame` (`io/data_frame.h`) — typed data packet passed between devices. Carries a MIME-like `type` field (e.g., `"text/plain"`, `"audio/pcm"`, `"action/tool_call"`).
+- `RouteTable` (`runtime/route_table.h`) — maps `PortAddress{device_id, port_name}` → list of destination `PortAddress`. Supports two path types:
+  - Control plane (`requires_control_plane = true`): routed through the runtime dispatch loop
+  - DMA path (`requires_control_plane = false`): frame delivered directly, bypasses LLM/controller
+- `CoreDevice` (`runtime/core_device.h`) — `IoDevice` adapter that wraps `AgentSession`. Translates `DataFrame` ↔ core types (`Observation`, `ActionCandidate`).
+- `AgentRuntime` (`runtime/agent_runtime.h`) — device bus. Owns the device registry and route table. Zero data transformation — pure lifecycle management and frame routing.
+
+### Invariants to preserve
+
+- `AgentRuntime::DispatchFrame` must never transform frame data. It only routes.
+- `CoreDevice` is the only place that translates between `DataFrame` and core types.
+- New voice/audio components must be implemented as `IoDevice` and registered via `RegisterDevice` + `AddRoute`. Do not add audio logic directly to `AgentRuntime` or `CoreDevice`.
+- DMA routes (`requires_control_plane = false`) must not involve the LLM or controller in their data path.
+- `RouteTable` is the single source of truth for all data flow topology. Do not hardcode device-to-device calls.
+
 ## Voice Conversation Architecture (Decoupled Design)
 
 The project is built around two independent but coordinated cores:
@@ -93,13 +115,13 @@ The project is built around two independent but coordinated cores:
 
 Design principle:
 - The voice pipeline is not hard-wired into the agent logic.
-- For the agent, voice capabilities are IO devices/services.
-- Whether `capture` data should enter `vad` is a controller decision, not a fixed pipeline rule.
+- For the agent, voice capabilities are IO devices registered in the runtime.
+- Whether `capture` data should enter `vad` is a routing decision (RouteTable), not a fixed pipeline rule.
 - When the agent wants to provide voice feedback, it invokes `tts` through IO.Action.
 
 To preserve low latency, split runtime communication into:
 - Control Plane: low-frequency decisions and commands (start, stop, route, interrupt)
-- Data Plane: high-frequency audio flow (can bypass LLM/controller loops, DMA-like direct path)
+- Data Plane: high-frequency audio flow (DMA path — `requires_control_plane = false`)
 
 ```mermaid
 flowchart LR
@@ -155,7 +177,32 @@ flowchart LR
 4. Data plane should avoid token-by-token LLM involvement for streaming media.
 5. Flutter UI communicates with C++ core via dart:ffi; no business logic in Dart.
 
-### Audio Backend Strategy
+## Services Directory Layout
+
+Services follow a `services/<module>/<vendor>` layout. Each vendor target is a standalone CMake static library.
+
+```
+services/
+├── llm/
+│   └── openai/          → shizuru_llm_openai
+├── asr/
+│   └── baidu/           → shizuru_asr_baidu
+├── tts/
+│   ├── baidu/           → shizuru_tts_baidu
+│   └── elevenlabs/      → shizuru_tts_elevenlabs
+├── utils/
+│   └── baidu/           → shizuru_baidu_utils  (BaiduConfig + BaiduTokenManager)
+├── io/                  → shizuru_io_services   (ToolDispatcher, ToolRegistry)
+└── memory/              (InMemoryStore — header-only)
+```
+
+When adding a new vendor implementation:
+- Create `services/<module>/<vendor>/` with its own `CMakeLists.txt`
+- Add `add_subdirectory(<vendor>)` in the parent `services/<module>/CMakeLists.txt`
+- Shared vendor utilities (e.g., auth tokens) go in `services/utils/<vendor>/`
+- Do not add vendor source files directly to a parent CMakeLists target
+
+## Audio Backend Strategy
 
 Audio recorder and player are defined as abstract C++ interfaces.
 Platform-specific implementations live in separate directories:
