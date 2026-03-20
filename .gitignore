@@ -7,6 +7,8 @@ build/
 .vscode/
 .windsurfrules
 .DS_Store
+.kiro/settings/
+.kiro/**/.config.kiro
 
 # OS
 Thumbs.db
@@ -15,6 +17,7 @@ Thumbs.db
 *.log
 *.mp3
 *.wav
+*.pcm
 
 # Temporary docs
 PR_DESCRIPTION.md

@@ -1,145 +1,139 @@
 #include "agent_runtime.h"
 
 #include <chrono>
+#include <stdexcept>
 #include <utility>
 
-#include <nlohmann/json.hpp>
-
-#include "io/tool_dispatcher.h"
-#include "llm/openai_client.h"
+#include "async_logger.h"
+#include "llm/openai/openai_client.h"
 #include "memory/in_memory_store.h"
 #include "audit/log_audit_sink.h"
+#include "io/tool_dispatcher.h"
 
 namespace shizuru::runtime {
 
-namespace {
-
-std::string GenerateSessionId() {
-  auto now = std::chrono::steady_clock::now();
-  auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now.time_since_epoch())
-                .count();
-  return "session_" + std::to_string(ms);
-}
-
-bool IsAudioMimeType(const std::string& mime_type) {
-  return mime_type.size() >= 6 && mime_type.rfind("audio/", 0) == 0;
-}
-
-std::string ExtractTextFromToolOutput(const std::string& output) {
-  try {
-    nlohmann::json j = nlohmann::json::parse(output);
-    if (j.is_object()) {
-      if (j.contains("text") && j["text"].is_string()) {
-        return j["text"].get<std::string>();
-      }
-      if (j.contains("transcript") && j["transcript"].is_string()) {
-        return j["transcript"].get<std::string>();
-      }
-    }
-    if (j.is_string()) {
-      return j.get<std::string>();
-    }
-  } catch (...) {
-    // Tool output is not JSON, treat as plain text.
-  }
-
-  return output;
-}
-
-}  // namespace
-
-AgentRuntime::AgentRuntime(RuntimeConfig config,
-                           services::ToolRegistry& tools)
+AgentRuntime::AgentRuntime(RuntimeConfig config, services::ToolRegistry& tools)
     : config_(std::move(config)), tools_(tools) {
   core::InitLogger(config_.logger);
 }
 
 AgentRuntime::~AgentRuntime() {
-  if (session_) {
-    Shutdown();
-  }
+  Shutdown();
 }
 
+// ---------------------------------------------------------------------------
+// Device management
+// ---------------------------------------------------------------------------
+
+void AgentRuntime::RegisterDevice(std::unique_ptr<io::IoDevice> device) {
+  const std::string id = device->GetDeviceId();
+  if (devices_.count(id)) {
+    throw std::invalid_argument("Device already registered: " + id);
+  }
+
+  // Wire the device's output callback to DispatchFrame.
+  device->SetOutputCallback(
+      [this](const std::string& device_id, const std::string& port_name,
+             io::DataFrame frame) {
+        DispatchFrame(device_id, port_name, std::move(frame));
+      });
+
+  registration_order_.push_back(id);
+  devices_[id] = std::move(device);
+}
+
+void AgentRuntime::UnregisterDevice(const std::string& device_id) {
+  auto it = devices_.find(device_id);
+  if (it == devices_.end()) { return; }
+
+  // Remove all routes that reference this device.
+  for (auto& route : route_table_.AllRoutes()) {
+    if (route.source.device_id == device_id ||
+        route.destination.device_id == device_id) {
+      route_table_.RemoveRoute(route.source, route.destination);
+    }
+  }
+
+  devices_.erase(it);
+  registration_order_.erase(
+      std::remove(registration_order_.begin(), registration_order_.end(),
+                  device_id),
+      registration_order_.end());
+}
+
+// ---------------------------------------------------------------------------
+// Route management
+// ---------------------------------------------------------------------------
+
+void AgentRuntime::AddRoute(PortAddress source, PortAddress destination,
+                             RouteOptions options) {
+  route_table_.AddRoute(std::move(source), std::move(destination), options);
+}
+
+void AgentRuntime::RemoveRoute(const PortAddress& source,
+                                const PortAddress& destination) {
+  route_table_.RemoveRoute(source, destination);
+}
+
+// ---------------------------------------------------------------------------
+// Backward-compatible public API
+// ---------------------------------------------------------------------------
+
 std::string AgentRuntime::StartSession() {
-  if (session_) {
+  // Shut down any existing session first.
+  if (HasActiveSession()) {
     Shutdown();
   }
 
-  std::string session_id = GenerateSessionId();
+  const std::string session_id =
+      "session-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count());
 
-  auto llm = std::make_unique<services::OpenAiClient>(config_.llm);
-  auto io = std::make_unique<services::ToolDispatcher>(tools_);
+  // Build CoreDevice with all session dependencies.
+  auto llm    = std::make_unique<services::OpenAiClient>(config_.llm);
+  auto io     = std::make_unique<services::ToolDispatcher>(tools_);
   auto memory = std::make_unique<services::InMemoryStore>();
-  auto audit = std::make_unique<services::LogAuditSink>();
+  auto audit  = std::make_unique<services::LogAuditSink>();
 
-  session_ = std::make_unique<core::AgentSession>(
-      session_id, config_.controller, config_.context, config_.policy,
+  auto core = std::make_unique<CoreDevice>(
+      "core", session_id,
+      config_.controller, config_.context, config_.policy,
       std::move(llm), std::move(io), std::move(memory), std::move(audit));
 
-  // Observe assistant text responses and optionally synthesize audio.
-  session_->GetController().OnResponse(
-      [this](const core::ActionCandidate& response) {
-        HandleAssistantResponse(response);
-      });
+  core_device_ = core.get();
+  RegisterDevice(std::move(core));
 
-  session_->Start();
+  // Wire CoreDevice text_out → output callback sink.
+  // We use a special sentinel device ID "app_output" that is never registered
+  // as a real device; DispatchFrame handles it inline.
+  AddRoute(PortAddress{"core", "text_out"},
+           PortAddress{"app_output", "text_in"},
+           RouteOptions{.requires_control_plane = false});
+
+  // Start all devices.
+  for (const auto& id : registration_order_) {
+    devices_.at(id)->Start();
+  }
+
+  LOG_INFO("[{}] Session started: {}", MODULE_NAME, session_id);
   return session_id;
 }
 
 void AgentRuntime::SendMessage(const std::string& content) {
-  SendInput(content, "text/plain");
-}
-
-void AgentRuntime::SendInput(const std::string& payload,
-                             const std::string& mime_type) {
-  if (!session_) {
+  if (!core_device_) {
+    LOG_WARN("[{}] SendMessage called with no active session", MODULE_NAME);
     return;
   }
 
-  LOG_DEBUG("[{}] SendInput mime_type={} payload_len={}",
-            MODULE_NAME, mime_type, payload.size());
+  io::DataFrame frame;
+  frame.type = "text/plain";
+  frame.payload = std::vector<uint8_t>(content.begin(), content.end());
+  frame.source_device = "user";
+  frame.source_port = "text";
+  frame.timestamp = std::chrono::steady_clock::now();
 
-  if (IsAudioMimeType(mime_type)) {
-    last_input_was_audio_.store(true);
-
-    if (!PassesVadGate(payload, mime_type)) {
-      RuntimeOutput output;
-      output.text = "Audio received, but VAD detected no speech.";
-
-      OutputCallback cb;
-      {
-        std::lock_guard<std::mutex> lock(output_cb_mutex_);
-        cb = output_cb_;
-      }
-      if (cb) {
-        cb(output);
-      }
-      return;
-    }
-
-    const std::string transcript = TranscribeAudioToText(payload, mime_type);
-    if (transcript.empty()) {
-      RuntimeOutput output;
-      output.text = "Audio received, but transcription failed or STT tool is unavailable.";
-
-      OutputCallback cb;
-      {
-        std::lock_guard<std::mutex> lock(output_cb_mutex_);
-        cb = output_cb_;
-      }
-      if (cb) {
-        cb(output);
-      }
-      return;
-    }
-
-    EnqueueUserText(transcript);
-    return;
-  }
-
-  last_input_was_audio_.store(false);
-  EnqueueUserText(payload);
+  // Deliver directly to CoreDevice's text_in port (Requirement 11.6).
+  core_device_->OnInput("text_in", std::move(frame));
 }
 
 void AgentRuntime::OnOutput(OutputCallback cb) {
@@ -147,210 +141,87 @@ void AgentRuntime::OnOutput(OutputCallback cb) {
   output_cb_ = std::move(cb);
 }
 
-void AgentRuntime::EnqueueUserText(const std::string& content) {
-  if (!session_) {
-    return;
-  }
-
-  LOG_INFO("[{}] Enqueue user text: \"{}\"", MODULE_NAME, content);
-  core::Observation obs;
-  obs.type = core::ObservationType::kUserMessage;
-  obs.content = content;
-  obs.source = "user";
-  obs.timestamp = std::chrono::steady_clock::now();
-  session_->EnqueueObservation(std::move(obs));
-}
-
-bool AgentRuntime::PassesVadGate(const std::string& payload,
-                                 const std::string& mime_type) {
-  const services::ToolFunction* vad_fn = tools_.Find("vad");
-  if (!vad_fn) {
-    // TODO(voice-tools): register a concrete "vad" tool in ToolRegistry.
-    // Default pass-through keeps current behavior backward-compatible.
-    return true;
-  }
-
-  nlohmann::json args;
-  args["audio"] = payload;
-  args["mime_type"] = mime_type;
-
-  core::ActionResult result;
-  try {
-    result = (*vad_fn)(args.dump());
-  } catch (...) {
-    return false;
-  }
-
-  if (!result.success || result.output.empty()) {
-    return false;
-  }
-
-  try {
-    nlohmann::json j = nlohmann::json::parse(result.output);
-    if (j.is_boolean()) {
-      return j.get<bool>();
-    }
-    if (j.is_object()) {
-      if (j.contains("is_speech") && j["is_speech"].is_boolean()) {
-        return j["is_speech"].get<bool>();
-      }
-      if (j.contains("speech") && j["speech"].is_boolean()) {
-        return j["speech"].get<bool>();
-      }
-      if (j.contains("score") && j["score"].is_number()) {
-        return j["score"].get<double>() >= 0.5;
-      }
-    }
-    if (j.is_string()) {
-      const std::string s = j.get<std::string>();
-      return s == "true" || s == "speech" || s == "1";
-    }
-  } catch (...) {
-    // Non-JSON output: use conservative parsing below.
-  }
-
-  return result.output == "true" || result.output == "speech" ||
-         result.output == "1";
-}
-
-std::string AgentRuntime::TranscribeAudioToText(const std::string& payload,
-                                                const std::string& mime_type) {
-  const services::ToolFunction* stt_fn = tools_.Find("stt");
-  if (!stt_fn) {
-    stt_fn = tools_.Find("asr");
-  }
-  if (!stt_fn) {
-    // TODO(voice-tools): register "stt" or "asr" tool implementation.
-    return "";
-  }
-
-  nlohmann::json args;
-  args["audio"] = payload;
-  args["mime_type"] = mime_type;
-
-  core::ActionResult result;
-  try {
-    result = (*stt_fn)(args.dump());
-  } catch (...) {
-    return "";
-  }
-
-  if (!result.success || result.output.empty()) {
-    return "";
-  }
-
-  return ExtractTextFromToolOutput(result.output);
-}
-
-bool AgentRuntime::ShouldSynthesizeAudio(
-    const core::ActionCandidate& response) const {
-  if (!config_.auto_tts_on_audio_input) {
-    return false;
-  }
-  if (!last_input_was_audio_.load()) {
-    return false;
-  }
-  if (response.type != core::ActionType::kResponse) {
-    return false;
-  }
-  if (response.response_text.empty()) {
-    return false;
-  }
-  return tools_.Has("tts") || tools_.Has("text_to_speech");
-}
-
-RuntimeOutput AgentRuntime::MaybeSynthesizeAudio(
-    const RuntimeOutput& text_output,
-    const core::ActionCandidate& response) {
-  RuntimeOutput output = text_output;
-
-  const services::ToolFunction* tts_fn = tools_.Find("tts");
-  if (!tts_fn) {
-    tts_fn = tools_.Find("text_to_speech");
-  }
-  if (!tts_fn) {
-    // TODO(voice-tools): register "tts" or "text_to_speech" tool implementation.
-    return output;
-  }
-
-  nlohmann::json args;
-  args["text"] = response.response_text;
-
-  core::ActionResult result;
-  try {
-    result = (*tts_fn)(args.dump());
-  } catch (...) {
-    return output;
-  }
-
-  if (!result.success || result.output.empty()) {
-    return output;
-  }
-
-  // Accept both plain payload and JSON shape {audio, mime_type}.
-  try {
-    nlohmann::json j = nlohmann::json::parse(result.output);
-    if (j.is_object()) {
-      if (j.contains("audio") && j["audio"].is_string()) {
-        output.audio_payload = j["audio"].get<std::string>();
-      }
-      if (j.contains("mime_type") && j["mime_type"].is_string()) {
-        output.audio_mime_type = j["mime_type"].get<std::string>();
-      }
-      output.has_audio = !output.audio_payload.empty();
-      return output;
-    }
-  } catch (...) {
-    // Not JSON, treat as raw audio payload.
-  }
-
-  output.audio_payload = result.output;
-  output.has_audio = true;
-  return output;
-}
-
-void AgentRuntime::HandleAssistantResponse(const core::ActionCandidate& response) {
-  if (response.type != core::ActionType::kResponse) {
-    return;
-  }
-
-  LOG_INFO("[{}] Assistant response: \"{}\"", MODULE_NAME, response.response_text);
-
-  RuntimeOutput output;
-  output.text = response.response_text;
-
-  if (ShouldSynthesizeAudio(response)) {
-    output = MaybeSynthesizeAudio(output, response);
-  }
-
-  OutputCallback cb;
-  {
-    std::lock_guard<std::mutex> lock(output_cb_mutex_);
-    cb = output_cb_;
-  }
-  if (cb) {
-    cb(output);
-  }
-}
-
 void AgentRuntime::Shutdown() {
-  if (session_) {
-    session_->Shutdown();
-    session_.reset();
+  if (devices_.empty()) { return; }
+
+  // Stop devices in reverse registration order (Requirement 8.6).
+  for (auto it = registration_order_.rbegin();
+       it != registration_order_.rend(); ++it) {
+    auto dev_it = devices_.find(*it);
+    if (dev_it != devices_.end()) {
+      try {
+        dev_it->second->Stop();
+      } catch (const std::exception& e) {
+        LOG_ERROR("[{}] Error stopping device {}: {}", MODULE_NAME, *it,
+                  e.what());
+      }
+    }
   }
-  last_input_was_audio_.store(false);
-  core::ShutdownLogger();
+
+  devices_.clear();
+  registration_order_.clear();
+  route_table_ = RouteTable{};
+  core_device_ = nullptr;
+
+  LOG_INFO("[{}] Session shut down", MODULE_NAME);
 }
 
 core::State AgentRuntime::GetState() const {
-  if (!session_) {
-    return core::State::kTerminated;
-  }
-  return session_->GetState();
+  if (!core_device_) { return core::State::kTerminated; }
+  return core_device_->GetState();
 }
 
 bool AgentRuntime::HasActiveSession() const {
-  return session_ != nullptr;
+  return core_device_ != nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Internal routing
+// ---------------------------------------------------------------------------
+
+void AgentRuntime::DispatchFrame(const std::string& device_id,
+                                  const std::string& port_name,
+                                  io::DataFrame frame) {
+  PortAddress source{device_id, port_name};
+  auto destinations = route_table_.Lookup(source);
+
+  if (destinations.empty()) {
+    // No routes — silently discard (Requirement 3.5).
+    return;
+  }
+
+  for (const auto& [dest, opts] : destinations) {
+    // Handle the virtual app_output sink inline.
+    if (dest.device_id == "app_output") {
+      if (frame.type == "text/plain") {
+        RuntimeOutput output;
+        output.text = std::string(frame.payload.begin(), frame.payload.end());
+        OutputCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(output_cb_mutex_);
+          cb = output_cb_;
+        }
+        if (cb) { cb(output); }
+      }
+      continue;
+    }
+
+    // Deliver to registered device.
+    auto it = devices_.find(dest.device_id);
+    if (it == devices_.end()) {
+      LOG_WARN("[{}] Route destination not found: {}", MODULE_NAME,
+               dest.device_id);
+      continue;
+    }
+
+    try {
+      // Zero transformation: frame passes through untouched (Requirement 8.1).
+      it->second->OnInput(dest.port_name, frame);
+    } catch (const std::exception& e) {
+      LOG_ERROR("[{}] Error delivering frame to {}:{} — {}", MODULE_NAME,
+                dest.device_id, dest.port_name, e.what());
+    }
+  }
 }
 
 }  // namespace shizuru::runtime
