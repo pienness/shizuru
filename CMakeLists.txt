@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
+
+# CMake 4.x removed compatibility with policies older than 3.5.
+# FetchContent dependencies (PortAudio, httplib, spdlog) may use older
+# cmake_minimum_required values.  This variable restores compatibility.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "4.0")
+  set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING
+      "Minimum policy version for FetchContent compatibility")
+endif()
 project(shizuru LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
