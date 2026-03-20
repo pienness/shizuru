@@ -1,4 +1,4 @@
-#include "baidu/asr/baidu_asr_client.h"
+#include "baidu_asr_client.h"
 
 #include <stdexcept>
 #include <vector>

@@ -1,4 +1,4 @@
-#include "llm/openai_client.h"
+#include "llm/openai/openai_client.h"
 
 #include <stdexcept>
 #include <string>
@@ -6,7 +6,7 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
-#include "llm/json_parser.h"
+#include "llm/openai/json_parser.h"
 #include "async_logger.h"
 
 namespace shizuru::services {

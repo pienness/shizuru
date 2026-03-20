@@ -3,8 +3,8 @@
 #include <memory>
 #include <string>
 
-#include "baidu/baidu_config.h"
-#include "baidu/token_manager.h"
+#include "utils/baidu/baidu_config.h"
+#include "utils/baidu/baidu_token_manager.h"
 
 namespace shizuru::services {
 

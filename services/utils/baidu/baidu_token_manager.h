@@ -4,7 +4,7 @@
 #include <mutex>
 #include <string>
 
-#include "baidu/baidu_config.h"
+#include "baidu_config.h"
 
 namespace shizuru::services {
 

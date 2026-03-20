@@ -1,4 +1,4 @@
-#include "baidu/tts/baidu_tts_client.h"
+#include "baidu_tts_client.h"
 
 #include <cstdio>
 #include <stdexcept>
