@@ -42,20 +42,48 @@
 - [x] `asr_tts_echo_pipeline` example: full voice echo pipeline without LLM
 - [x] `voice_agent` example: full voice agent (VAD + ASR + LLM + TTS)
 
-## Phase 5 — Platform Audio Backends
+## Phase 5 — Thread Safety + Architecture Hardening (Planned)
 
-- [ ] Android: Oboe backend (`io/audio/audio_device/oboe/`)
-- [ ] iOS: CoreAudio backend (`io/audio/audio_device/core_audio/`)
+- [ ] **T1-1** `AgentRuntime::DispatchFrame`: add `shared_mutex` to protect `devices_` and `route_table_` from concurrent access during `Shutdown`
+- [ ] **T1-2** `BaiduAsrDevice::Flush()`: remove blocking `join` from PortAudio callback thread; introduce internal worker queue
+- [ ] **T1-3** `ElevenLabsTtsDevice::OnInput`: remove blocking `join` from `Controller::loop_thread_`; post to internal queue
+- [ ] **T1-4** `CoreDevice::active_`: change `bool` to `std::atomic<bool>`
+- [ ] **T1-5** `Controller` callbacks: guard `OnResponse`/`OnTransition`/`OnDiagnostic` registration with a mutex or pre-`Start()` assertion
+- [ ] **T1-6** `AudioPlayoutDevice`: remove debug `static fopen`/`fwrite` from production code path
+- [ ] **T2-1** `Controller`: remove `IoBridge` dependency; `HandleActing` emits `action_out` DataFrame and suspends in `kActing` until `kToolResult` observation arrives
+- [ ] **T2-2** `CoreDevice`: remove `InterceptingIoBridge`; move `action_out` emit into `Controller`
+- [ ] **T2-3** Add `ToolDispatchDevice`: `IoDevice` that executes tools from `ToolRegistry` and returns results as DataFrames
+- [ ] **T2-4** Wire `core:action_out → tool_dispatch:action_in` and `tool_dispatch:result_out → core:tool_result_in` in `AgentRuntime`
+- [ ] **T3-1** Add `control_out` port to `CoreDevice`; `Controller` emits control frames on interrupt and response delivery
+- [ ] **T3-2** Define control frame protocol (`control/cancel`, `control/flush`) in a shared header
+- [ ] **T3-3** Add `control_in` port to `ElevenLabsTtsDevice`, `AudioPlayoutDevice`, `BaiduAsrDevice`
+- [ ] **T3-4** Remove direct `asr_ptr->Flush()` from `VadEventDevice`; route all control through `CoreDevice`
+
+## Phase 6 — Audio Quality: 3A Processing
+
+Desktop platforms (PortAudio) have no hardware 3A. Mobile platforms (Oboe, CoreAudio) expose hardware 3A which is sufficient at 16 kHz for both ASR input and TTS playout — no software processing needed there.
+
+- [ ] **AEC** (Acoustic Echo Cancellation): software implementation for desktop; cancels TTS playout from the capture signal so the ASR does not transcribe the agent's own voice. Implemented as an `IoDevice` (`io/audio/aec/`) inserted between capture and VAD.
+- [ ] **ANS** (Ambient Noise Suppression): software implementation for desktop; reduces background noise before ASR. Implemented as an `IoDevice` (`io/audio/ans/`) inserted between capture (or AEC output) and VAD.
+- [ ] **AGC** (Automatic Gain Control): software implementation for desktop; normalizes capture level to keep ASR input within a consistent amplitude range. Implemented as an `IoDevice` (`io/audio/agc/`) in the same capture chain.
+- [ ] Mobile: enable hardware 3A via Oboe (`AAudioStream` / `AudioEffect`) and CoreAudio session category flags — no additional `IoDevice` needed on those platforms.
+- [ ] CMake: gate software 3A targets on `NOT (ANDROID OR IOS)`; mobile builds skip the `io/audio/aec`, `io/audio/ans`, `io/audio/agc` subdirectories entirely.
+- [ ] Candidate library: [WebRTC AudioProcessing Module](https://chromium.googlesource.com/external/webrtc/) (APM) — provides AEC3, NS, AGC2 in a single C++ library, well-tested at 16 kHz.
+
+## Phase 7 — Platform Audio Backends
+
+- [ ] Android: Oboe backend (`io/audio/audio_device/oboe/`) with hardware 3A enabled
+- [ ] iOS: CoreAudio backend (`io/audio/audio_device/core_audio/`) with hardware 3A via AVAudioSession
 - [ ] Windows: WASAPI backend (`io/audio/audio_device/wasapi/`)
 
-## Phase 6 — Flutter UI
+## Phase 7 — Flutter UI
 
 - [ ] dart:ffi bridge: expose `AgentRuntime` as a C API, bind from Dart
 - [ ] Conversation view: message history, input field, audio waveform indicator
 - [ ] Debug panel: state machine status, token usage, tool call log, route table view
 - [ ] Cross-platform Flutter app scaffolding (desktop + mobile)
 
-## Phase 7 — Production Hardening
+## Phase 8 — Production Hardening
 
 - [ ] Config loader: `RuntimeConfig` from JSON/YAML file
 - [ ] Persistent `MemoryStore`: SQLite-backed, survives restarts
