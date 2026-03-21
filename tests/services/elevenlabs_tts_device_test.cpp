@@ -24,15 +24,15 @@ namespace {
 // ---------------------------------------------------------------------------
 // MockTtsClient: returns canned PCM audio bytes synchronously.
 // ---------------------------------------------------------------------------
-class MockTtsClient : public TtsClient {
+class MockTtsClient : public services::TtsClient {
  public:
   // Canned audio payload returned for every Synthesize call.
   std::vector<uint8_t> canned_audio{0x01, 0x02, 0x03, 0x04};
   std::atomic<int> synthesize_count{0};
   std::atomic<int> cancel_count{0};
 
-  void Synthesize(const TtsRequest& /*request*/,
-                  TtsAudioCallback on_audio) override {
+  void Synthesize(const services::TtsRequest& /*request*/,
+                  services::TtsAudioCallback on_audio) override {
     ++synthesize_count;
     if (on_audio && !canned_audio.empty()) {
       on_audio(canned_audio.data(), canned_audio.size());
@@ -40,7 +40,7 @@ class MockTtsClient : public TtsClient {
   }
 
   void Synthesize(const std::string& /*text*/,
-                  TtsAudioCallback on_audio) override {
+                  services::TtsAudioCallback on_audio) override {
     ++synthesize_count;
     if (on_audio && !canned_audio.empty()) {
       on_audio(canned_audio.data(), canned_audio.size());
