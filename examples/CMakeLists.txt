@@ -43,13 +43,13 @@ target_include_directories(asr_tts_echo_pipeline
   PRIVATE ${CMAKE_SOURCE_DIR}/io
 )
 
-# Voice agent: Microphone → VAD → Baidu ASR → LLM (AgentRuntime) → Baidu TTS → Speaker
+# Voice agent: Microphone → VAD → Baidu ASR → LLM (AgentRuntime) → ElevenLabs TTS → Speaker
 add_executable(voice_agent voice_agent.cpp)
 target_link_libraries(voice_agent
   PRIVATE shizuru_runtime
   PRIVATE shizuru_vad
   PRIVATE shizuru_asr_baidu_device
-  PRIVATE shizuru_tts_baidu_device
+  PRIVATE shizuru_tts_elevenlabs_device
   PRIVATE shizuru_audio
   PRIVATE shizuru_utils
 )

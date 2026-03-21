@@ -60,24 +60,56 @@ void ElevenLabsTtsDevice::CancelSynthesis() { Stop(); }
 // ---------------------------------------------------------------------------
 
 void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
+  // Carry buffer: holds at most 1 leftover byte from the previous chunk.
+  // s16le PCM requires 2-byte alignment; HTTP chunks may arrive with an odd
+  // byte count, splitting a sample across two consecutive callbacks.
+  // Pattern mirrors elevenlabs_tts_playout.cpp: stitch carry first, then
+  // process the bulk, then stash any trailing odd byte.
+  uint8_t carry     = 0;
+  bool    has_carry = false;
+
+  auto emit = [&](const uint8_t* buf, size_t byte_count) {
+    if (byte_count == 0) { return; }
+    DataFrame frame;
+    frame.type          = "audio/pcm";
+    frame.payload.assign(buf, buf + byte_count);
+    frame.source_device = device_id_;
+    frame.source_port   = kAudioOut;
+    frame.timestamp     = std::chrono::steady_clock::now();
+    OutputCallback cb;
+    {
+      std::lock_guard<std::mutex> lock(output_cb_mutex_);
+      cb = output_cb_;
+    }
+    if (cb) { cb(device_id_, kAudioOut, std::move(frame)); }
+  };
+
   try {
-    client_->Synthesize(text, [this](const void* data, size_t bytes) {
+    client_->Synthesize(text, [&](const void* data, size_t bytes) {
       if (!active_.load() || bytes == 0) { return; }
 
-      DataFrame frame;
-      frame.type = "audio/pcm";
-      frame.payload.assign(static_cast<const uint8_t*>(data),
-                           static_cast<const uint8_t*>(data) + bytes);
-      frame.source_device = device_id_;
-      frame.source_port   = kAudioOut;
-      frame.timestamp     = std::chrono::steady_clock::now();
+      const auto* src = static_cast<const uint8_t*>(data);
+      size_t offset = 0;
 
-      OutputCallback cb;
-      {
-        std::lock_guard<std::mutex> lock(output_cb_mutex_);
-        cb = output_cb_;
+      // Step 1: if we have a carry byte, stitch it with src[0] to complete
+      // the sample, emit that single aligned pair, then advance past it.
+      if (has_carry) {
+        uint8_t pair[2] = {carry, src[0]};
+        emit(pair, 2);
+        has_carry = false;
+        offset = 1;
       }
-      if (cb) { cb(device_id_, kAudioOut, std::move(frame)); }
+
+      // Step 2: emit the aligned bulk of the remaining bytes.
+      const size_t remaining = bytes - offset;
+      const size_t aligned   = (remaining / sizeof(int16_t)) * sizeof(int16_t);
+      emit(src + offset, aligned);
+
+      // Step 3: stash any trailing odd byte for the next chunk.
+      if (remaining % sizeof(int16_t) != 0) {
+        carry     = src[offset + aligned];
+        has_carry = true;
+      }
     });
   } catch (const std::exception& e) {
     LOG_ERROR("ElevenLabsTtsDevice: synthesis error: {}", e.what());

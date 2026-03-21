@@ -2,16 +2,16 @@
 //
 // Pipeline topology:
 //
-//   [AudioCaptureDevice] audio_out ──► [EnergyVadDevice] audio_in
-//   [EnergyVadDevice]    audio_out ──► [BaiduAsrDevice]  audio_in
-//   [EnergyVadDevice]    vad_out   ──► [VadEventDevice]  vad_in
-//                                          └── on speech_end → asr.Flush()
-//   [BaiduAsrDevice]     text_out  ──► [core]            text_in
-//   [core]               text_out  ──► app_output (AgentRuntime built-in sink)
-//   [BaiduTtsDevice]     audio_out ──► [AudioPlayoutDevice] audio_in
+//   [AudioCaptureDevice]    audio_out ──► [EnergyVadDevice]    audio_in
+//   [EnergyVadDevice]       audio_out ──► [BaiduAsrDevice]     audio_in
+//   [EnergyVadDevice]       vad_out   ──► [VadEventDevice]     vad_in
+//                                             └── on speech_end → asr.Flush()
+//   [BaiduAsrDevice]        text_out  ──► [core]               text_in
+//   [core]                  text_out  ──► app_output (AgentRuntime built-in sink)
+//   [ElevenLabsTtsDevice]   audio_out ──► [AudioPlayoutDevice] audio_in
 //
 // The TTS device is driven by the AgentRuntime output callback: when the LLM
-// produces a final text response, it is fed directly into BaiduTtsDevice.
+// produces a final text response, it is fed directly into ElevenLabsTtsDevice.
 //
 // All audio routes use requires_control_plane = false (DMA path).
 // The LLM/controller path is handled internally by AgentRuntime.
@@ -20,7 +20,8 @@
 //   export BAIDU_API_KEY=...
 //   export BAIDU_SECRET_KEY=...
 //   export OPENAI_API_KEY=...
-//   ./voice_agent [--base-url <url>] [--model <model>] [--debug]
+//   export ELEVENLABS_API_KEY=...
+//   ./voice_agent [--base-url <url>] [--model <model>] [--voice-id <id>] [--debug]
 //
 // Speak naturally — VAD handles segmentation. Ctrl+C to quit.
 
@@ -35,7 +36,7 @@
 #include "async_logger.h"
 #include "io/data_frame.h"
 #include "io/asr/baidu/baidu_asr_device.h"
-#include "io/tts/baidu/baidu_tts_device.h"
+#include "io/tts/elevenlabs/elevenlabs_tts_device.h"
 #include "io/vad/energy_vad_device.h"
 #include "io/vad/vad_event_device.h"
 #include "audio/audio_capture_device.h"
@@ -43,6 +44,7 @@
 #include "audio_device/port_audio/pa_player.h"
 #include "audio_device/port_audio/pa_recorder.h"
 #include "utils/baidu/baidu_config.h"
+#include "tts/config.h"
 #include "runtime/agent_runtime.h"
 #include "runtime/route_table.h"
 #include "io/tool_registry.h"
@@ -55,6 +57,7 @@ int main(int argc, char* argv[]) {
   bool debug_mode = false;
   std::string base_url = "https://dashscope.aliyuncs.com";
   std::string model    = "qwen3-coder-next";
+  std::string voice_id;  // empty → ElevenLabsConfig default (Rachel)
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -64,13 +67,16 @@ int main(int argc, char* argv[]) {
       base_url = argv[++i];
     } else if (arg == "--model" && i + 1 < argc) {
       model = argv[++i];
+    } else if (arg == "--voice-id" && i + 1 < argc) {
+      voice_id = argv[++i];
     }
   }
 
   // ── Environment ───────────────────────────────────────────────────────────
-  const char* baidu_ak  = std::getenv("BAIDU_API_KEY");
-  const char* baidu_sk  = std::getenv("BAIDU_SECRET_KEY");
-  const char* openai_key = std::getenv("OPENAI_API_KEY");
+  const char* baidu_ak      = std::getenv("BAIDU_API_KEY");
+  const char* baidu_sk      = std::getenv("BAIDU_SECRET_KEY");
+  const char* openai_key    = std::getenv("OPENAI_API_KEY");
+  const char* elevenlabs_key = std::getenv("ELEVENLABS_API_KEY");
 
   if (baidu_ak == nullptr || baidu_sk == nullptr) {
     std::fprintf(stderr,
@@ -79,6 +85,10 @@ int main(int argc, char* argv[]) {
   }
   if (openai_key == nullptr) {
     std::fprintf(stderr, "Error: set OPENAI_API_KEY env var.\n");
+    return 1;
+  }
+  if (elevenlabs_key == nullptr) {
+    std::fprintf(stderr, "Error: set ELEVENLABS_API_KEY env var.\n");
     return 1;
   }
 
@@ -130,11 +140,17 @@ int main(int argc, char* argv[]) {
   auto vad = std::make_unique<io::EnergyVadDevice>(vad_cfg);
 
   auto asr = std::make_unique<io::BaiduAsrDevice>(baidu_cfg, token_mgr);
-  auto tts = std::make_unique<io::BaiduTtsDevice>(baidu_cfg, token_mgr);
+
+  // ElevenLabs TTS: pcm_16000 matches the pipeline sample rate.
+  services::ElevenLabsConfig el_cfg;
+  el_cfg.api_key       = elevenlabs_key;
+  el_cfg.output_format = services::TtsOutputFormat::kPcm16000;
+  if (!voice_id.empty()) { el_cfg.voice_id = voice_id; }
+  auto tts = std::make_unique<io::ElevenLabsTtsDevice>(el_cfg);
 
   // Keep raw pointers before moving ownership into the runtime.
-  io::BaiduAsrDevice* asr_ptr = asr.get();
-  io::BaiduTtsDevice* tts_ptr = tts.get();
+  io::BaiduAsrDevice*       asr_ptr = asr.get();
+  io::ElevenLabsTtsDevice*  tts_ptr = tts.get();
 
   // VadEventDevice: triggers asr.Flush() on speech_end.
   auto asr_flush = std::make_unique<io::VadEventDevice>(
@@ -186,8 +202,8 @@ int main(int argc, char* argv[]) {
                    {"core",      "text_in"}, kDma);
 
   // tts audio_out → playout
-  runtime.AddRoute({"baidu_tts",    "audio_out"},
-                   {"audio_playout", "audio_in"}, kDma);
+  runtime.AddRoute({"elevenlabs_tts", "audio_out"},
+                   {"audio_playout",  "audio_in"}, kDma);
 
   // ── Output callback: LLM response → TTS ──────────────────────────────────
   runtime.OnOutput([tts_ptr](const runtime::RuntimeOutput& output) {
@@ -207,7 +223,7 @@ int main(int argc, char* argv[]) {
   // ── Start ─────────────────────────────────────────────────────────────────
   runtime.StartSession();
 
-  std::printf("=== Voice Agent (VAD + Baidu ASR + %s LLM + Baidu TTS) ===\n",
+  std::printf("=== Voice Agent (VAD + Baidu ASR + %s LLM + ElevenLabs TTS) ===\n",
               model.c_str());
   std::printf("Log level : %s\n",
               debug_mode ? "debug (all frames)" : "info (events + text)");
