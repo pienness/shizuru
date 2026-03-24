@@ -17,10 +17,10 @@
 #include "policy/config.h"
 #include "controller/types.h"
 #include "context/types.h"
+#include "io/control_frame.h"
 #include "io/data_frame.h"
 #include "runtime/core_device.h"
 #include "mock_audit_sink.h"
-#include "mock_io_bridge.h"
 #include "mock_llm_client.h"
 #include "mock_memory_store.h"
 
@@ -33,12 +33,9 @@ namespace {
 
 std::unique_ptr<CoreDevice> MakeCoreDevice(
     const std::string& device_id,
-    core::testing::MockLlmClient** llm_out = nullptr,
-    core::testing::MockIoBridge** io_out = nullptr) {
+    core::testing::MockLlmClient** llm_out = nullptr) {
   auto llm = std::make_unique<core::testing::MockLlmClient>();
-  auto io  = std::make_unique<core::testing::MockIoBridge>();
   if (llm_out) *llm_out = llm.get();
-  if (io_out)  *io_out  = io.get();
 
   // Default LLM: return a kResponse to end the loop quickly.
   llm->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
@@ -64,7 +61,7 @@ std::unique_ptr<CoreDevice> MakeCoreDevice(
   return std::make_unique<CoreDevice>(
       device_id, "test-session",
       ctrl_cfg, ctx_cfg, core::PolicyConfig{},
-      std::move(llm), std::move(io),
+      std::move(llm),
       std::make_unique<core::testing::MockMemoryStore>(),
       std::make_unique<core::testing::MockAuditSink>());
 }
@@ -95,9 +92,7 @@ rc::Gen<std::string> genUnsupportedPort() {
   return rc::gen::suchThat(genShortAlpha(), [](const std::string& s) {
     return s != "text_in" && s != "tool_result_in";
   });
-}
-
-// ---------------------------------------------------------------------------
+}// ---------------------------------------------------------------------------
 // Property 6: CoreDevice Text-to-Observation Translation
 // Feature: runtime-io-redesign, Property 6: CoreDevice Text-to-Observation Translation
 // ---------------------------------------------------------------------------
@@ -243,6 +238,124 @@ RC_GTEST_PROP(CoreDevicePropTest, prop_unsupported_port_discarded, ()) {
 
   // The unsupported port input must not trigger any output callback.
   RC_ASSERT(callback_count.load() == 0);
+}
+
+// ---------------------------------------------------------------------------
+// Property 7: speech_end on vad_in produces flush on control_out
+// Feature: core-decoupling, Property 7: speech_end produces flush
+// ---------------------------------------------------------------------------
+// **Validates: Requirements 6.4, 8.5**
+RC_GTEST_PROP(CoreDevicePropTest, prop_speech_end_produces_flush, ()) {
+  // Property: any vad/event frame with payload "speech_end" delivered to
+  // vad_in must cause control_out to emit a frame where Parse == "flush".
+  auto device = MakeCoreDevice("core_vad");
+
+  std::mutex mu;
+  std::vector<std::pair<std::string, io::DataFrame>> emitted;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.emplace_back(port, std::move(f));
+  });
+
+  device->Start();
+
+  // Deliver speech_end on vad_in.
+  const std::string event = "speech_end";
+  io::DataFrame vad_frame;
+  vad_frame.type = "vad/event";
+  vad_frame.payload = std::vector<uint8_t>(event.begin(), event.end());
+  device->OnInput("vad_in", std::move(vad_frame));
+
+  // Wait briefly for the synchronous emit to propagate.
+  bool got_flush = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [port, f] : emitted) {
+      if (port == "control_out" && io::ControlFrame::Parse(f) == "flush") {
+        return true;
+      }
+    }
+    return false;
+  }, 200);
+
+  device->Stop();
+
+  RC_ASSERT(got_flush);
+}
+
+// ---------------------------------------------------------------------------
+// Property 8: Interrupt produces cancel on control_out
+// Feature: core-decoupling, Property 8: interrupt produces cancel
+// ---------------------------------------------------------------------------
+// **Validates: Requirements 1.5, 6.2**
+RC_GTEST_PROP(CoreDevicePropTest, prop_interrupt_produces_cancel, ()) {
+  // Property: a speech_start VAD event while the controller is in kThinking
+  // must cause control_out to emit "cancel" immediately.
+  //
+  // CoreDevice::OnInput("vad_in", "speech_start") emits cancel directly on
+  // control_out and enqueues an interrupt — no dependency on the LLM thread.
+
+  core::testing::MockLlmClient* llm = nullptr;
+  auto device = MakeCoreDevice("core_intr", &llm);
+
+  // LLM blocks indefinitely (simulates kThinking) until the device is stopped.
+  llm->submit_fn = [&](const core::ContextWindow&) -> core::LlmResult {
+    llm->WaitForCancel(2000);
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "done";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  std::mutex mu;
+  std::vector<std::pair<std::string, io::DataFrame>> emitted;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.emplace_back(port, std::move(f));
+  });
+
+  device->Start();
+
+  // Send first message — controller enters kThinking and blocks in LLM.
+  const std::string msg1 = "first";
+  io::DataFrame frame1;
+  frame1.type = "text/plain";
+  frame1.payload = std::vector<uint8_t>(msg1.begin(), msg1.end());
+  device->OnInput("text_in", std::move(frame1));
+
+  // Wait until controller is in kThinking.
+  bool in_thinking = WaitFor([&] {
+    return device->GetState() == core::State::kThinking;
+  }, 300);
+  RC_ASSERT(in_thinking);
+
+  // Deliver speech_start on vad_in — this emits cancel immediately on
+  // control_out without waiting for the LLM thread to unblock.
+  const std::string speech_start = "speech_start";
+  io::DataFrame vad_frame;
+  vad_frame.type = "vad/event";
+  vad_frame.payload = std::vector<uint8_t>(speech_start.begin(), speech_start.end());
+  device->OnInput("vad_in", std::move(vad_frame));
+
+  // Verify cancel was emitted on control_out.
+  bool got_cancel = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [port, f] : emitted) {
+      if (port == "control_out" && io::ControlFrame::Parse(f) == "cancel") {
+        return true;
+      }
+    }
+    return false;
+  }, 500);
+
+  device->Stop();
+
+  RC_ASSERT(got_cancel);
 }
 
 }  // namespace

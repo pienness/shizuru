@@ -457,58 +457,59 @@ TEST(EnergyVadWindowTest, StartClearsWindow) {
 
 class VadEventTest : public ::testing::Test {};
 
+// Helper: collect vad_out payloads from a VadEventDevice.
+static std::vector<std::string> CollectVadOut(VadEventDevice& dev,
+                                               const std::vector<std::string>& events) {
+  std::vector<std::string> out;
+  dev.SetOutputCallback([&](auto, const std::string& port, DataFrame f) {
+    if (port == VadEventDevice::kVadOut) {
+      out.emplace_back(f.payload.begin(), f.payload.end());
+    }
+  });
+  dev.Start();
+  for (const auto& ev : events) {
+    dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent(ev));
+  }
+  return out;
+}
+
 TEST_F(VadEventTest, PortDescriptors) {
-  VadEventDevice dev([](auto) {});
+  VadEventDevice dev;
   const auto ports = dev.GetPortDescriptors();
-  ASSERT_EQ(ports.size(), 1U);
-  EXPECT_EQ(ports[0].name,      VadEventDevice::kVadIn);
-  EXPECT_EQ(ports[0].direction, PortDirection::kInput);
-  EXPECT_EQ(ports[0].data_type, "vad/event");
+  // Should have vad_in (input) and vad_out (output).
+  ASSERT_EQ(ports.size(), 2U);
+  bool has_in = false, has_out = false;
+  for (const auto& p : ports) {
+    if (p.name == VadEventDevice::kVadIn)  { has_in  = true; EXPECT_EQ(p.direction, PortDirection::kInput);  }
+    if (p.name == VadEventDevice::kVadOut) { has_out = true; EXPECT_EQ(p.direction, PortDirection::kOutput); }
+  }
+  EXPECT_TRUE(has_in);
+  EXPECT_TRUE(has_out);
 }
 
-TEST_F(VadEventTest, DefaultTriggerIsSpeechEnd) {
-  std::vector<std::string> fired;
-  VadEventDevice dev([&](const std::string& ev) { fired.push_back(ev); });
-  dev.Start();
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_start"));
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_active"));
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_end"));
-  ASSERT_EQ(fired.size(), 1U);
-  EXPECT_EQ(fired[0], "speech_end");
-}
-
-TEST_F(VadEventTest, CustomTriggerEvents) {
-  std::vector<std::string> fired;
-  VadEventDevice dev([&](const std::string& ev) { fired.push_back(ev); },
-                     {"speech_start", "speech_end"});
-  dev.Start();
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_start"));
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_active"));
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_end"));
-  ASSERT_EQ(fired.size(), 2U);
-  EXPECT_EQ(fired[0], "speech_start");
-  EXPECT_EQ(fired[1], "speech_end");
+TEST_F(VadEventTest, AllEventsPassThrough) {
+  VadEventDevice dev;
+  auto out = CollectVadOut(dev, {"speech_start", "speech_active", "speech_end"});
+  ASSERT_EQ(out.size(), 3U);
+  // Payload is the raw JSON from MakeVadEvent, passed through unchanged.
+  EXPECT_NE(out[0].find("speech_start"), std::string::npos);
+  EXPECT_NE(out[1].find("speech_active"), std::string::npos);
+  EXPECT_NE(out[2].find("speech_end"), std::string::npos);
 }
 
 TEST_F(VadEventTest, UnknownPortIgnored) {
-  int call_count = 0;
-  VadEventDevice dev([&](auto) { ++call_count; });
+  VadEventDevice dev;
+  std::vector<std::string> out;
+  dev.SetOutputCallback([&](auto, auto, DataFrame f) {
+    out.emplace_back(f.payload.begin(), f.payload.end());
+  });
   dev.Start();
   dev.OnInput("wrong_port", MakeVadEvent("speech_end"));
-  EXPECT_EQ(call_count, 0);
+  EXPECT_TRUE(out.empty());
 }
 
-TEST_F(VadEventTest, NonMatchingEventDoesNotFire) {
-  int call_count = 0;
-  VadEventDevice dev([&](auto) { ++call_count; }, {"speech_end"});
-  dev.Start();
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_start"));
-  dev.OnInput(VadEventDevice::kVadIn, MakeVadEvent("speech_active"));
-  EXPECT_EQ(call_count, 0);
-}
-
-TEST_F(VadEventTest, NoOutputPorts) {
-  VadEventDevice dev([](auto) {});
+TEST_F(VadEventTest, SetOutputCallbackDoesNotThrow) {
+  VadEventDevice dev;
   EXPECT_NO_THROW(dev.SetOutputCallback([](auto, auto, auto) {}));
 }
 
@@ -525,9 +526,15 @@ TEST(VadIntegrationTest, VadEventDeviceFiresOnSpeechEnd) {
       .pre_roll_frames         = 0,
   };
   EnergyVadDevice vad(cfg);
+  VadEventDevice flusher;
 
-  int flush_count = 0;
-  VadEventDevice flusher([&](auto) { ++flush_count; }, {"speech_end"});
+  int speech_end_count = 0;
+  flusher.SetOutputCallback([&](auto, const std::string& port, DataFrame f) {
+    if (port == VadEventDevice::kVadOut) {
+      std::string payload(f.payload.begin(), f.payload.end());
+      if (payload.find("speech_end") != std::string::npos) { ++speech_end_count; }
+    }
+  });
 
   vad.SetOutputCallback([&](auto, const std::string& port, DataFrame f) {
     if (port == EnergyVadDevice::kVadOut) {
@@ -543,14 +550,14 @@ TEST(VadIntegrationTest, VadEventDeviceFiresOnSpeechEnd) {
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));     // speech_end
-  EXPECT_EQ(flush_count, 1);
+  EXPECT_EQ(speech_end_count, 1);
 
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(5000));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(5000));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));
   vad.OnInput(EnergyVadDevice::kAudioIn, MakeAudioFrame(0));
-  EXPECT_EQ(flush_count, 2);
+  EXPECT_EQ(speech_end_count, 2);
 }
 
 TEST(VadIntegrationTest, AudioOutOnlyContainsSpeechFrames) {

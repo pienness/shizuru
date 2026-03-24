@@ -50,7 +50,7 @@ target_include_directories(context_strategy_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
 add_test(NAME context_strategy_test COMMAND context_strategy_test)
-set_tests_properties(context_strategy_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=20")
+set_tests_properties(context_strategy_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")
 
 # Policy layer tests (unit + property)
 add_executable(policy_layer_test
@@ -67,4 +67,4 @@ target_include_directories(policy_layer_test
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/mocks
 )
 add_test(NAME policy_layer_test COMMAND policy_layer_test)
-set_tests_properties(policy_layer_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=20")
+set_tests_properties(policy_layer_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")

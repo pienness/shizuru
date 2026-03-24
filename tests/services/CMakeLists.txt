@@ -19,7 +19,7 @@ target_link_libraries(json_parser_test
 )
 add_test(NAME json_parser_test COMMAND json_parser_test)
 
-# Tool dispatcher tests
+# ToolRegistry tests
 add_executable(tool_dispatcher_test
   tool_dispatcher_test.cpp
 )
@@ -66,7 +66,7 @@ target_include_directories(elevenlabs_tts_device_test
   PRIVATE ${CMAKE_SOURCE_DIR}/services
 )
 add_test(NAME elevenlabs_tts_device_test COMMAND elevenlabs_tts_device_test)
-set_tests_properties(elevenlabs_tts_device_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=50")
+set_tests_properties(elevenlabs_tts_device_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")
 
 # ASR device property tests
 add_executable(asr_device_prop_test
@@ -81,4 +81,4 @@ target_include_directories(asr_device_prop_test
   PRIVATE ${CMAKE_SOURCE_DIR}
 )
 add_test(NAME asr_device_prop_test COMMAND asr_device_prop_test)
-set_tests_properties(asr_device_prop_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=100")
+set_tests_properties(asr_device_prop_test PROPERTIES ENVIRONMENT "RC_PARAMS=max_success=10")

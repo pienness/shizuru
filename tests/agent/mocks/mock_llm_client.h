@@ -27,8 +27,10 @@ class MockLlmClient : public LlmClient {
   int cancel_count = 0;
 
   LlmResult Submit(const ContextWindow& context) override {
-    std::lock_guard<std::mutex> lock(mu_);
-    submit_calls.push_back(context);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      submit_calls.push_back(context);
+    }
     if (submit_fn) {
       return submit_fn(context);
     }
@@ -38,8 +40,10 @@ class MockLlmClient : public LlmClient {
 
   LlmResult SubmitStreaming(const ContextWindow& context,
                             StreamCallback on_token) override {
-    std::lock_guard<std::mutex> lock(mu_);
-    submit_streaming_calls.push_back(context);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      submit_streaming_calls.push_back(context);
+    }
     if (submit_fn) {
       return submit_fn(context);
     }
@@ -47,12 +51,24 @@ class MockLlmClient : public LlmClient {
   }
 
   void Cancel() override {
-    std::lock_guard<std::mutex> lock(mu_);
-    ++cancel_count;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      ++cancel_count;
+    }
+    cancel_cv_.notify_all();
+  }
+
+  // Blocks until Cancel() is called or timeout_ms elapses. Returns true if
+  // cancelled. Useful in submit_fn lambdas to simulate a cancellable LLM call.
+  bool WaitForCancel(int timeout_ms = 500) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return cancel_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms),
+                               [this] { return cancel_count > 0; });
   }
 
  private:
   std::mutex mu_;
+  std::condition_variable cancel_cv_;
 };
 
 }  // namespace shizuru::core::testing

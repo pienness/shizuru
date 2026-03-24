@@ -15,10 +15,11 @@
 #include "policy/config.h"
 #include "controller/types.h"
 #include "context/types.h"
+#include "io/control_frame.h"
 #include "io/data_frame.h"
+#include "io/io_device.h"
 #include "runtime/core_device.h"
 #include "mock_audit_sink.h"
-#include "mock_io_bridge.h"
 #include "mock_llm_client.h"
 #include "mock_memory_store.h"
 
@@ -32,12 +33,9 @@ namespace {
 std::unique_ptr<CoreDevice> MakeCoreDevice(
     const std::string& device_id,
     core::testing::MockLlmClient** llm_out = nullptr,
-    core::testing::MockIoBridge** io_out = nullptr,
     core::PolicyConfig pol_cfg = {}) {
   auto llm = std::make_unique<core::testing::MockLlmClient>();
-  auto io  = std::make_unique<core::testing::MockIoBridge>();
   if (llm_out) *llm_out = llm.get();
-  if (io_out)  *io_out  = io.get();
 
   // Default LLM: return a kResponse to end the loop quickly.
   llm->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
@@ -63,7 +61,7 @@ std::unique_ptr<CoreDevice> MakeCoreDevice(
   return std::make_unique<CoreDevice>(
       device_id, "test-session",
       ctrl_cfg, ctx_cfg, std::move(pol_cfg),
-      std::move(llm), std::move(io),
+      std::move(llm),
       std::make_unique<core::testing::MockMemoryStore>(),
       std::make_unique<core::testing::MockAuditSink>());
 }
@@ -146,7 +144,7 @@ TEST(CoreDeviceTest, ToolCallActionCandidateToDataFrame) {
   pol_cfg.initial_rules = {allow_search};
   pol_cfg.default_capabilities = {"search"};
 
-  auto device = MakeCoreDevice("core_unit2", &llm, nullptr, std::move(pol_cfg));
+  auto device = MakeCoreDevice("core_unit2", &llm, std::move(pol_cfg));
 
   // First call: return kToolCall. Second call (after tool result): kResponse.
   std::atomic<int> call_count{0};
@@ -279,7 +277,7 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
   pol_cfg.default_capabilities = {"search"};
 
   // Rebuild device with the policy config.
-  device = MakeCoreDevice("core_unit4b", &llm, nullptr, std::move(pol_cfg));
+  device = MakeCoreDevice("core_unit4b", &llm, std::move(pol_cfg));
   call_count.store(0);
   {
     std::lock_guard<std::mutex> lock(mu);
@@ -340,6 +338,132 @@ TEST(CoreDeviceTest, ToolResultInPortCreatesToolResultObservation) {
   device->Stop();
 
   EXPECT_TRUE(second_call) << "LLM was not called again after tool_result_in";
+}
+
+// ---------------------------------------------------------------------------
+// Test: GetPortDescriptors contains vad_in and control_out with correct types
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, GetPortDescriptorsContainsVadInAndControlOut) {
+  auto device = MakeCoreDevice("core_ports");
+
+  const auto ports = device->GetPortDescriptors();
+
+  bool found_vad_in = false;
+  bool found_control_out = false;
+  for (const auto& p : ports) {
+    if (p.name == "vad_in") {
+      EXPECT_EQ(p.direction, io::PortDirection::kInput);
+      EXPECT_EQ(p.data_type, "vad/event");
+      found_vad_in = true;
+    }
+    if (p.name == "control_out") {
+      EXPECT_EQ(p.direction, io::PortDirection::kOutput);
+      EXPECT_EQ(p.data_type, "control/command");
+      found_control_out = true;
+    }
+  }
+  EXPECT_TRUE(found_vad_in) << "vad_in port not found in GetPortDescriptors()";
+  EXPECT_TRUE(found_control_out) << "control_out port not found in GetPortDescriptors()";
+}
+
+// ---------------------------------------------------------------------------
+// Test: vad/event "speech_end" on vad_in → control_out emits "flush"
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, SpeechEndOnVadInEmitsFlushOnControlOut) {
+  auto device = MakeCoreDevice("core_vad_unit");
+
+  std::mutex mu;
+  std::vector<std::pair<std::string, io::DataFrame>> emitted;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.emplace_back(port, std::move(f));
+  });
+
+  device->Start();
+
+  const std::string event = "speech_end";
+  io::DataFrame vad_frame;
+  vad_frame.type = "vad/event";
+  vad_frame.payload = std::vector<uint8_t>(event.begin(), event.end());
+  device->OnInput("vad_in", std::move(vad_frame));
+
+  bool got_flush = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [port, f] : emitted) {
+      if (port == "control_out" && io::ControlFrame::Parse(f) == "flush") {
+        return true;
+      }
+    }
+    return false;
+  });
+
+  device->Stop();
+
+  EXPECT_TRUE(got_flush) << "control_out did not emit 'flush' after speech_end on vad_in";
+}
+
+// ---------------------------------------------------------------------------
+// Test: kResponseDelivered transition → control_out must NOT emit "cancel"
+// (cancel is only emitted on kInterrupt, not on normal response delivery)
+// ---------------------------------------------------------------------------
+TEST(CoreDeviceTest, ResponseDeliveredTransitionDoesNotEmitCancel) {
+  core::testing::MockLlmClient* llm = nullptr;
+  auto device = MakeCoreDevice("core_resp_del", &llm);
+
+  // LLM returns kResponse immediately — this triggers kResponseDelivered.
+  llm->submit_fn = [](const core::ContextWindow&) -> core::LlmResult {
+    core::LlmResult r;
+    r.candidate.type = core::ActionType::kResponse;
+    r.candidate.response_text = "hello";
+    r.prompt_tokens = 1;
+    r.completion_tokens = 1;
+    return r;
+  };
+
+  std::mutex mu;
+  std::vector<std::pair<std::string, io::DataFrame>> emitted;
+  device->SetOutputCallback([&](const std::string& /*dev*/,
+                                const std::string& port,
+                                io::DataFrame f) {
+    std::lock_guard<std::mutex> lock(mu);
+    emitted.emplace_back(port, std::move(f));
+  });
+
+  device->Start();
+
+  const std::string text = "trigger";
+  io::DataFrame frame;
+  frame.type = "text/plain";
+  frame.payload = std::vector<uint8_t>(text.begin(), text.end());
+  device->OnInput("text_in", std::move(frame));
+
+  // Wait for the text/plain response to be emitted (confirms the turn completed).
+  bool got_response = WaitFor([&] {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& [port, f] : emitted) {
+      if (port == "text_out" && f.type == "text/plain") return true;
+    }
+    return false;
+  });
+
+  // Give a brief window for any spurious cancel to appear.
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+  device->Stop();
+
+  ASSERT_TRUE(got_response) << "text_out response was never emitted";
+
+  std::lock_guard<std::mutex> lock(mu);
+  bool found_cancel = false;
+  for (const auto& [port, f] : emitted) {
+    if (port == "control_out" && io::ControlFrame::Parse(f) == "cancel") {
+      found_cancel = true;
+      break;
+    }
+  }
+  EXPECT_FALSE(found_cancel) << "control_out must NOT emit 'cancel' on kResponseDelivered";
 }
 
 // ---------------------------------------------------------------------------

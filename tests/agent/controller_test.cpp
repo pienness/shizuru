@@ -17,8 +17,8 @@
 #include "controller/config.h"
 #include "controller/controller.h"
 #include "controller/types.h"
+#include "io/data_frame.h"
 #include "mock_audit_sink.h"
-#include "mock_io_bridge.h"
 #include "mock_llm_client.h"
 #include "mock_memory_store.h"
 #include "policy/config.h"
@@ -55,9 +55,7 @@ class ControllerTest : public ::testing::Test {
 
   std::unique_ptr<Controller> MakeController(ControllerConfig cfg) {
     auto llm = std::make_unique<testing::MockLlmClient>();
-    auto io = std::make_unique<testing::MockIoBridge>();
     llm_raw_ = llm.get();
-    io_raw_ = io.get();
 
     llm_raw_->submit_fn = [](const ContextWindow&) -> LlmResult {
       LlmResult r;
@@ -69,7 +67,8 @@ class ControllerTest : public ::testing::Test {
     };
 
     return std::make_unique<Controller>(
-        "test-session", std::move(cfg), std::move(llm), std::move(io),
+        "test-session", std::move(cfg), std::move(llm),
+        nullptr, nullptr,
         *context_, *policy_);
   }
 
@@ -100,7 +99,6 @@ class ControllerTest : public ::testing::Test {
   std::unique_ptr<ContextStrategy> context_;
   std::unique_ptr<PolicyLayer> policy_;
   testing::MockLlmClient* llm_raw_ = nullptr;
-  testing::MockIoBridge* io_raw_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -157,7 +155,7 @@ TEST_F(ControllerTest, TransitionSequence_FullResponseCycle) {
 }
 
 // ---------------------------------------------------------------------------
-// Transition sequence: tool call cycle
+// Transition sequence: tool call cycle (async via EmitFrameCallback + kToolResult)
 // ---------------------------------------------------------------------------
 TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
   PolicyConfig pol_cfg;
@@ -174,9 +172,7 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
   policy2.GrantCapability("test-session", "tool_cap");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
-  auto io = std::make_unique<testing::MockIoBridge>();
   auto* llm_ptr = llm.get();
-  auto* io_ptr = io.get();
 
   std::atomic<int> call_count{0};
   llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
@@ -195,12 +191,34 @@ TEST_F(ControllerTest, TransitionSequence_ToolCallCycle) {
     return r;
   };
 
-  io_ptr->execute_fn = [](const ActionCandidate&) -> ActionResult {
-    return ActionResult{true, "tool output", ""};
+  // Capture the controller pointer so we can enqueue kToolResult from the callback.
+  Controller* ctrl_ptr = nullptr;
+  std::mutex ctrl_mu;
+
+  // EmitFrameCallback: when action_out fires, enqueue a kToolResult observation.
+  Controller::EmitFrameCallback emit_frame = [&](const std::string& port,
+                                                  io::DataFrame /*frame*/) {
+    if (port == "action_out") {
+      std::lock_guard<std::mutex> lock(ctrl_mu);
+      if (ctrl_ptr) {
+        Observation result_obs;
+        result_obs.type = ObservationType::kToolResult;
+        result_obs.content = R"({"success":true,"output":"tool output"})";
+        result_obs.source = "tool:my_tool";
+        result_obs.timestamp = std::chrono::steady_clock::now();
+        ctrl_ptr->EnqueueObservation(std::move(result_obs));
+      }
+    }
   };
 
-  Controller ctrl("test-session", DefaultConfig(), std::move(llm), std::move(io),
+  Controller ctrl("test-session", DefaultConfig(), std::move(llm),
+                  std::move(emit_frame), nullptr,
                   *context_, policy2);
+
+  {
+    std::lock_guard<std::mutex> lock(ctrl_mu);
+    ctrl_ptr = &ctrl;
+  }
 
   std::mutex mu;
   std::vector<std::tuple<State, State, Event>> transitions;
@@ -246,7 +264,6 @@ TEST_F(ControllerTest, ErrorRecovery_LlmFailureThenRecover) {
   cfg.max_retries = 0;
 
   auto llm = std::make_unique<testing::MockLlmClient>();
-  auto io = std::make_unique<testing::MockIoBridge>();
   auto* llm_ptr = llm.get();
 
   std::atomic<int> call_count{0};
@@ -261,7 +278,7 @@ TEST_F(ControllerTest, ErrorRecovery_LlmFailureThenRecover) {
     return r;
   };
 
-  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), *context_, *policy_);
+  Controller ctrl("test-session", cfg, std::move(llm), nullptr, nullptr, *context_, *policy_);
 
   std::mutex mu;
   std::vector<std::tuple<State, State, Event>> transitions;
@@ -369,9 +386,26 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
   policy2.GrantCapability("test-session", "cap");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
-  auto io = std::make_unique<testing::MockIoBridge>();
   auto* llm_ptr = llm.get();
-  auto* io_ptr = io.get();
+
+  // Capture controller pointer to enqueue kToolResult from emit callback.
+  Controller* ctrl_ptr2 = nullptr;
+  std::mutex ctrl_mu2;
+
+  Controller::EmitFrameCallback emit_frame2 = [&](const std::string& port,
+                                                    io::DataFrame /*frame*/) {
+    if (port == "action_out") {
+      std::lock_guard<std::mutex> lock(ctrl_mu2);
+      if (ctrl_ptr2) {
+        Observation result_obs;
+        result_obs.type = ObservationType::kToolResult;
+        result_obs.content = R"({"success":true,"output":"ok"})";
+        result_obs.source = "tool";
+        result_obs.timestamp = std::chrono::steady_clock::now();
+        ctrl_ptr2->EnqueueObservation(std::move(result_obs));
+      }
+    }
+  };
 
   llm_ptr->submit_fn = [](const ContextWindow&) -> LlmResult {
     LlmResult r;
@@ -383,11 +417,14 @@ TEST_F(ControllerTest, BudgetExceeded_ActionCountLimit) {
     return r;
   };
 
-  io_ptr->execute_fn = [](const ActionCandidate&) -> ActionResult {
-    return ActionResult{true, "ok", ""};
-  };
+  Controller ctrl("test-session", cfg, std::move(llm),
+                  std::move(emit_frame2), nullptr,
+                  *context_, policy2);
 
-  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), *context_, policy2);
+  {
+    std::lock_guard<std::mutex> lock(ctrl_mu2);
+    ctrl_ptr2 = &ctrl;
+  }
 
   std::mutex mu;
   std::vector<std::string> diagnostics;
@@ -507,7 +544,6 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
   policy2.InitSession("test-session");
 
   auto llm = std::make_unique<testing::MockLlmClient>();
-  auto io = std::make_unique<testing::MockIoBridge>();
   auto* llm_ptr = llm.get();
 
   std::atomic<int> llm_call_count{0};
@@ -525,7 +561,7 @@ TEST_F(ControllerTest, InterruptDuringThinking) {
     return r;
   };
 
-  Controller ctrl("test-session", cfg, std::move(llm), std::move(io), context2, policy2);
+  Controller ctrl("test-session", cfg, std::move(llm), nullptr, nullptr, context2, policy2);
 
   std::mutex mu;
   std::vector<std::string> diagnostics;
@@ -709,6 +745,145 @@ TEST_F(ControllerTest, GetStateIsThreadSafe) {
 
   ctrl->Shutdown();
   EXPECT_EQ(valid_reads.load(), 400);
+}
+
+// ---------------------------------------------------------------------------
+// HandleInterrupt while kActing invokes CancelCallback
+// ---------------------------------------------------------------------------
+TEST_F(ControllerTest, HandleInterrupt_WhileActing_InvokesCancelCallback) {
+  PolicyConfig pol_cfg;
+  PolicyRule allow_rule;
+  allow_rule.priority = 0;
+  allow_rule.action_pattern = "slow_tool";
+  allow_rule.required_capability = "tool_cap";
+  allow_rule.outcome = PolicyOutcome::kAllow;
+  pol_cfg.initial_rules = {allow_rule};
+
+  testing::MockAuditSink audit2;
+  PolicyLayer policy2(pol_cfg, audit2);
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "tool_cap");
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  // LLM returns a tool call on first invocation; never returns on second
+  // (interrupt will fire before that).
+  std::atomic<int> call_count{0};
+  llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
+    int c = call_count.fetch_add(1);
+    LlmResult r;
+    if (c == 0) {
+      r.candidate.type = ActionType::kToolCall;
+      r.candidate.action_name = "slow_tool";
+      r.candidate.required_capability = "tool_cap";
+    } else {
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "done";
+    }
+    r.prompt_tokens = 10;
+    r.completion_tokens = 5;
+    return r;
+  };
+
+  // Track CancelCallback invocations.
+  std::atomic<int> cancel_invoked{0};
+  Controller::CancelCallback cancel_cb = [&]() {
+    cancel_invoked.fetch_add(1);
+  };
+
+  // EmitFrameCallback: do NOT enqueue kToolResult — leave controller in kActing
+  // so we can interrupt it.
+  Controller::EmitFrameCallback emit_frame = [](const std::string&,
+                                                io::DataFrame) {};
+
+  Controller ctrl("test-session", DefaultConfig(), std::move(llm),
+                  std::move(emit_frame), std::move(cancel_cb),
+                  *context_, policy2);
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("use tool"));
+
+  // Wait until controller enters kActing (emit_frame fired, no result enqueued).
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kActing; }));
+
+  // Send an interrupt (user message while kActing triggers HandleInterrupt).
+  ctrl.EnqueueObservation(MakeUserObs("interrupt!"));
+
+  // Wait for transition back to kListening.
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.Shutdown();
+
+  EXPECT_GE(cancel_invoked.load(), 1)
+      << "CancelCallback must be invoked when interrupt fires during kActing";
+}
+
+// ---------------------------------------------------------------------------
+// cancel = nullptr + HandleInterrupt does not crash
+// ---------------------------------------------------------------------------
+TEST_F(ControllerTest, HandleInterrupt_NullCancel_DoesNotCrash) {
+  PolicyConfig pol_cfg;
+  PolicyRule allow_rule;
+  allow_rule.priority = 0;
+  allow_rule.action_pattern = "any_tool";
+  allow_rule.required_capability = "cap";
+  allow_rule.outcome = PolicyOutcome::kAllow;
+  pol_cfg.initial_rules = {allow_rule};
+
+  testing::MockAuditSink audit2;
+  PolicyLayer policy2(pol_cfg, audit2);
+  policy2.InitSession("test-session");
+  policy2.GrantCapability("test-session", "cap");
+
+  auto llm = std::make_unique<testing::MockLlmClient>();
+  auto* llm_ptr = llm.get();
+
+  std::atomic<int> call_count{0};
+  llm_ptr->submit_fn = [&](const ContextWindow&) -> LlmResult {
+    int c = call_count.fetch_add(1);
+    LlmResult r;
+    if (c == 0) {
+      r.candidate.type = ActionType::kToolCall;
+      r.candidate.action_name = "any_tool";
+      r.candidate.required_capability = "cap";
+    } else {
+      r.candidate.type = ActionType::kResponse;
+      r.candidate.response_text = "done";
+    }
+    r.prompt_tokens = 10;
+    r.completion_tokens = 5;
+    return r;
+  };
+
+  // EmitFrameCallback: do NOT enqueue kToolResult — leave controller in kActing.
+  Controller::EmitFrameCallback emit_frame = [](const std::string&,
+                                                io::DataFrame) {};
+
+  // cancel = nullptr — must not crash when HandleInterrupt is called.
+  Controller ctrl("test-session", DefaultConfig(), std::move(llm),
+                  std::move(emit_frame), nullptr /* cancel */,
+                  *context_, policy2);
+
+  ctrl.Start();
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.EnqueueObservation(MakeUserObs("use tool"));
+
+  // Wait until controller enters kActing.
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kActing; }));
+
+  // Send interrupt — must not crash even though cancel_ is nullptr.
+  ctrl.EnqueueObservation(MakeUserObs("interrupt!"));
+
+  // Wait for transition back to kListening.
+  ASSERT_TRUE(WaitFor([&] { return ctrl.GetState() == State::kListening; }));
+
+  ctrl.Shutdown();
+  // If we reach here without crashing, the test passes.
+  SUCCEED();
 }
 
 }  // namespace
