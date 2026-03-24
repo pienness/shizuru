@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "async_logger.h"
+#include "io/control_frame.h"
 
 namespace shizuru::io {
 
@@ -38,12 +39,20 @@ std::string BaiduAsrDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> BaiduAsrDevice::GetPortDescriptors() const {
   return {
-      {kAudioIn, PortDirection::kInput,  "audio/pcm"},
-      {kTextOut, PortDirection::kOutput, "text/plain"},
+      {kAudioIn,   PortDirection::kInput,  "audio/pcm"},
+      {kTextOut,   PortDirection::kOutput, "text/plain"},
+      {kControlIn, PortDirection::kInput,  "control/command"},
   };
 }
 
 void BaiduAsrDevice::OnInput(const std::string& port_name, DataFrame frame) {
+  if (port_name == kControlIn) {
+    const std::string cmd = ControlFrame::Parse(frame);
+    LOG_INFO("BaiduAsrDevice: control_in received cmd '{}'", cmd);
+    if (cmd == ControlFrame::kCommandFlush)  { Flush(); }
+    else if (cmd == ControlFrame::kCommandCancel) { CancelTranscription(); }
+    return;
+  }
   if (!active_.load()) { return; }
   if (port_name != kAudioIn) {
     LOG_WARN("BaiduAsrDevice: unsupported input port: {}", port_name);
@@ -52,6 +61,8 @@ void BaiduAsrDevice::OnInput(const std::string& port_name, DataFrame frame) {
   std::lock_guard<std::mutex> lock(audio_mutex_);
   audio_buffer_.insert(audio_buffer_.end(),
                        frame.payload.begin(), frame.payload.end());
+  LOG_DEBUG("BaiduAsrDevice: audio_in +{} bytes, buffer={} bytes",
+            frame.payload.size(), audio_buffer_.size());
 }
 
 void BaiduAsrDevice::SetOutputCallback(OutputCallback cb) {
@@ -94,6 +105,8 @@ void BaiduAsrDevice::Flush() {
     LOG_WARN("BaiduAsrDevice: Flush called with no audio data");
     return;
   }
+
+  LOG_INFO("BaiduAsrDevice: flushing {} bytes to ASR", audio.size());
 
   {
     std::lock_guard<std::mutex> lock(worker_mutex_);

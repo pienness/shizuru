@@ -1,6 +1,7 @@
 add_library(shizuru_runtime STATIC
   agent_runtime.cpp
   core_device.cpp
+  tool_dispatch_device.cpp
 )
 
 target_include_directories(shizuru_runtime

@@ -5,35 +5,9 @@
 #include <utility>
 
 #include "async_logger.h"
+#include "io/control_frame.h"
 
 namespace shizuru::runtime {
-
-namespace {
-
-// Wraps an IoBridge to intercept Execute() calls and emit action/tool_call
-// DataFrames before delegating to the real bridge.
-class InterceptingIoBridge : public core::IoBridge {
- public:
-  using EmitFn = std::function<void(const core::ActionCandidate&)>;
-
-  InterceptingIoBridge(std::unique_ptr<core::IoBridge> inner, EmitFn on_execute)
-      : inner_(std::move(inner)), on_execute_(std::move(on_execute)) {}
-
-  core::ActionResult Execute(const core::ActionCandidate& action) override {
-    if (on_execute_) on_execute_(action);
-    return inner_->Execute(action);
-  }
-
-  void Cancel() override { inner_->Cancel(); }
-
- private:
-  std::unique_ptr<core::IoBridge> inner_;
-  EmitFn on_execute_;
-};
-
-}  // namespace
-
-
 
 CoreDevice::CoreDevice(std::string device_id,
                        std::string session_id,
@@ -41,25 +15,18 @@ CoreDevice::CoreDevice(std::string device_id,
                        core::ContextConfig ctx_config,
                        core::PolicyConfig pol_config,
                        std::unique_ptr<core::LlmClient> llm,
-                       std::unique_ptr<core::IoBridge> io,
                        std::unique_ptr<core::MemoryStore> memory,
                        std::unique_ptr<core::AuditSink> audit)
     : device_id_(std::move(device_id)) {
-  // Wrap the IoBridge to intercept tool call dispatches and emit DataFrames.
-  auto intercepting_io = std::make_unique<InterceptingIoBridge>(
-      std::move(io),
-      [this](const core::ActionCandidate& action) {
-        const std::string serialized =
-            action.action_name + ":" + action.arguments;
-        io::DataFrame frame;
-        frame.type = "action/tool_call";
-        frame.payload =
-            std::vector<uint8_t>(serialized.begin(), serialized.end());
-        frame.source_device = device_id_;
-        frame.source_port = kActionOut;
-        frame.timestamp = std::chrono::steady_clock::now();
-        EmitFrame(kActionOut, std::move(frame));
-      });
+  // EmitFrameCallback: called by Controller to emit action/tool_call frames.
+  auto emit_frame = [this](const std::string& port, io::DataFrame frame) {
+    EmitFrame(port, std::move(frame));
+  };
+
+  // CancelCallback: called by Controller on interrupt — emits cancel on control_out.
+  auto cancel = [this]() {
+    EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+  };
 
   session_ = std::make_unique<core::AgentSession>(
       std::move(session_id),
@@ -67,9 +34,21 @@ CoreDevice::CoreDevice(std::string device_id,
       std::move(ctx_config),
       std::move(pol_config),
       std::move(llm),
-      std::move(intercepting_io),
+      std::move(emit_frame),
+      std::move(cancel),
       std::move(memory),
       std::move(audit));
+
+  // OnTransition: emit cancel on control_out when transitioning to kListening
+  // via kInterrupt or kResponseDelivered.
+  session_->GetController().OnTransition(
+      [this](core::State /*from*/, core::State to, core::Event event) {
+        if (to == core::State::kListening &&
+            event == core::Event::kInterrupt) {
+          // User interrupted — cancel in-progress TTS/playout immediately.
+          EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+        }
+      });
 
   // Hook Controller::OnResponse to emit DataFrames for kResponse actions.
   session_->GetController().OnResponse(
@@ -95,8 +74,10 @@ std::vector<io::PortDescriptor> CoreDevice::GetPortDescriptors() const {
   return {
       {kTextIn,       io::PortDirection::kInput,  "text/plain"},
       {kToolResultIn, io::PortDirection::kInput,  "action/tool_result"},
+      {kVadIn,        io::PortDirection::kInput,  "vad/event"},
       {kTextOut,      io::PortDirection::kOutput, "text/plain"},
       {kActionOut,    io::PortDirection::kOutput, "action/tool_call"},
+      {kControlOut,   io::PortDirection::kOutput, "control/command"},
   };
 }
 
@@ -121,6 +102,19 @@ void CoreDevice::OnInput(const std::string& port_name, io::DataFrame frame) {
     obs.source = "tool";
     obs.timestamp = std::chrono::steady_clock::now();
     session_->EnqueueObservation(std::move(obs));
+  } else if (port_name == kVadIn) {
+    const std::string event_name(frame.payload.begin(), frame.payload.end());
+    LOG_INFO("CoreDevice: vad_in received event '{}'", event_name);
+    if (event_name == "speech_end") {
+      LOG_INFO("CoreDevice: emitting flush on control_out");
+      EmitFrame(kControlOut, io::ControlFrame::Make("flush"));
+    } else if (event_name == "speech_start") {
+      // User started speaking — cancel TTS/playout immediately via control_out,
+      // then interrupt the controller so it transitions out of kThinking/kActing.
+      EmitFrame(kControlOut, io::ControlFrame::Make("cancel"));
+      session_->GetController().Interrupt();
+    }
+    // speech_active is silently ignored.
   } else {
     LOG_WARN("CoreDevice: unsupported input port: {}", port_name);
   }

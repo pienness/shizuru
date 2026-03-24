@@ -143,11 +143,9 @@ void EnergyVadDevice::EmitAudio(DataFrame frame) {
 }
 
 void EnergyVadDevice::EmitEvent(const std::string& event) {
-  const std::string json = R"({"event":")" + event + R"("})";
-
   DataFrame frame;
   frame.type    = "vad/event";
-  frame.payload.assign(json.begin(), json.end());
+  frame.payload.assign(event.begin(), event.end());
   frame.source_device = device_id_;
   frame.source_port   = kVadOut;
   frame.timestamp     = std::chrono::steady_clock::now();

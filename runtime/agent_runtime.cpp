@@ -9,7 +9,7 @@
 #include "llm/openai/openai_client.h"
 #include "memory/in_memory_store.h"
 #include "audit/log_audit_sink.h"
-#include "io/tool_dispatcher.h"
+#include "runtime/tool_dispatch_device.h"
 
 namespace shizuru::runtime {
 
@@ -109,17 +109,23 @@ std::string AgentRuntime::StartSession() {
 
   // Build CoreDevice with all session dependencies.
   auto llm    = std::make_unique<services::OpenAiClient>(config_.llm);
-  auto io     = std::make_unique<services::ToolDispatcher>(tools_);
   auto memory = std::make_unique<services::InMemoryStore>();
   auto audit  = std::make_unique<services::LogAuditSink>();
 
   auto core = std::make_unique<CoreDevice>(
       "core", session_id,
       config_.controller, config_.context, config_.policy,
-      std::move(llm), std::move(io), std::move(memory), std::move(audit));
+      std::move(llm), std::move(memory), std::move(audit));
 
   // Wire output callback before registering.
   core->SetOutputCallback(
+      [this](const std::string& device_id, const std::string& port_name,
+             io::DataFrame frame) {
+        DispatchFrame(device_id, port_name, std::move(frame));
+      });
+
+  auto tool_dispatch = std::make_unique<ToolDispatchDevice>(tools_);
+  tool_dispatch->SetOutputCallback(
       [this](const std::string& device_id, const std::string& port_name,
              io::DataFrame frame) {
         DispatchFrame(device_id, port_name, std::move(frame));
@@ -131,9 +137,36 @@ std::string AgentRuntime::StartSession() {
     registration_order_.push_back("core");
     devices_["core"] = std::move(core);
 
+    registration_order_.push_back("tool_dispatch");
+    devices_["tool_dispatch"] = std::move(tool_dispatch);
+
     route_table_.AddRoute(PortAddress{"core", "text_out"},
                           PortAddress{"app_output", "text_in"},
                           RouteOptions{.requires_control_plane = false});
+
+    // Tool call async round-trip routes (Requirements 4.2, 4.3).
+    route_table_.AddRoute(PortAddress{"core", "action_out"},
+                          PortAddress{"tool_dispatch", "action_in"},
+                          RouteOptions{.requires_control_plane = true});
+    route_table_.AddRoute(PortAddress{"tool_dispatch", "result_out"},
+                          PortAddress{"core", "tool_result_in"},
+                          RouteOptions{.requires_control_plane = true});
+
+    // VAD event route: DMA path (Requirement 8.6).
+    route_table_.AddRoute(PortAddress{"vad_event", "vad_out"},
+                          PortAddress{"core", "vad_in"},
+                          RouteOptions{.requires_control_plane = false});
+
+    // Control plane routes to IO devices (Requirement 8.7).
+    route_table_.AddRoute(PortAddress{"core", "control_out"},
+                          PortAddress{"baidu_asr", "control_in"},
+                          RouteOptions{.requires_control_plane = true});
+    route_table_.AddRoute(PortAddress{"core", "control_out"},
+                          PortAddress{"elevenlabs_tts", "control_in"},
+                          RouteOptions{.requires_control_plane = true});
+    route_table_.AddRoute(PortAddress{"core", "control_out"},
+                          PortAddress{"audio_playout", "control_in"},
+                          RouteOptions{.requires_control_plane = true});
   }
 
   // Start all devices (outside the lock — Start() may call back into DispatchFrame).

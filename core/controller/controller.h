@@ -15,8 +15,8 @@
 #include "context/context_strategy.h"
 #include "controller/config.h"
 #include "controller/types.h"
-#include "interfaces/io_bridge.h"
 #include "interfaces/llm_client.h"
+#include "io/data_frame.h"
 #include "policy/policy_layer.h"
 
 namespace shizuru::core {
@@ -32,13 +32,20 @@ struct PairHash {
 
 class Controller {
  public:
+  // Injected by CoreDevice; called when Controller needs to cancel in-progress IO.
+  using CancelCallback = std::function<void()>;
+
+  // Injected by CoreDevice; called when Controller wants to emit a DataFrame.
+  using EmitFrameCallback = std::function<void(const std::string& port, io::DataFrame)>;
+
   // All dependencies injected via constructor.
   // session_id must match the key used to initialize ContextStrategy and
   // PolicyLayer (via InitSession), so all lookups resolve to the same slot.
   Controller(std::string session_id,
              ControllerConfig config,
              std::unique_ptr<LlmClient> llm,
-             std::unique_ptr<IoBridge> io,
+             EmitFrameCallback emit_frame,
+             CancelCallback cancel,
              ContextStrategy& context,
              PolicyLayer& policy);
 
@@ -61,6 +68,10 @@ class Controller {
       std::function<void(State from, State to, Event event)>;
   void OnTransition(TransitionCallback cb);
 
+  // Request an interrupt from outside the loop thread (e.g. VAD speech_start).
+  // Thread-safe. No-op if not in an interruptible state.
+  void Interrupt();
+
   // Register callback for diagnostic events.
   using DiagnosticCallback = std::function<void(const std::string& message)>;
   void OnDiagnostic(DiagnosticCallback cb);
@@ -78,7 +89,8 @@ class Controller {
   bool TryTransition(Event event);           // Validate + execute transition
   void HandleThinking(const Observation& obs); // Build context, call LLM
   void HandleRouting(ActionCandidate ac);    // Route LLM output
-  void HandleActing(ActionCandidate ac);     // Execute IO action
+  void HandleActing(ActionCandidate ac);     // Emit action frame (non-blocking)
+  void HandleActingResult(const Observation& obs); // Process tool result
   void HandleResponding(ActionCandidate ac); // Deliver response
   bool CheckBudget();                        // Enforce guardrails
   void HandleInterrupt();                    // Cancel in-progress work
@@ -90,9 +102,14 @@ class Controller {
 
   ControllerConfig config_;
   std::unique_ptr<LlmClient> llm_;
-  std::unique_ptr<IoBridge> io_;
+  EmitFrameCallback emit_frame_;
+  CancelCallback cancel_;
   ContextStrategy& context_;
   PolicyLayer& policy_;
+
+  // Pending tool call state (set in HandleActing, read in HandleActingResult)
+  std::string pending_tool_call_id_;
+  ActionCandidate pending_action_;
 
   // State (accessed from loop thread; read via atomic for external queries)
   std::atomic<State> state_{State::kIdle};

@@ -4,14 +4,19 @@
 #include <string>
 #include <unordered_map>
 
-#include "interfaces/io_bridge.h"
-
 namespace shizuru::services {
 
+// Result of a tool execution.
+struct ToolResult {
+  bool success = false;
+  std::string output;        // Serialized result data
+  std::string error_message; // Non-empty on failure
+};
+
 // A registered tool's execution function.
-// Takes JSON arguments string, returns ActionResult.
+// Takes JSON arguments string, returns ToolResult.
 using ToolFunction =
-    std::function<core::ActionResult(const std::string& arguments)>;
+    std::function<ToolResult(const std::string& arguments)>;
 
 // Registry of available tools that the agent can invoke.
 class ToolRegistry {

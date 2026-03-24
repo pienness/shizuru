@@ -8,6 +8,7 @@ add_library(shizuru_core STATIC
 
 target_include_directories(shizuru_core
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+  PUBLIC ${CMAKE_SOURCE_DIR}
 )
 
 target_link_libraries(shizuru_core

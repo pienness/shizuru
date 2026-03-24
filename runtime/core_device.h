@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -7,9 +8,9 @@
 
 #include "context/config.h"
 #include "controller/config.h"
+#include "controller/controller.h"
 #include "controller/types.h"
 #include "interfaces/audit_sink.h"
-#include "interfaces/io_bridge.h"
 #include "interfaces/llm_client.h"
 #include "interfaces/memory_store.h"
 #include "io/io_device.h"
@@ -28,7 +29,6 @@ class CoreDevice : public io::IoDevice {
              core::ContextConfig ctx_config,
              core::PolicyConfig pol_config,
              std::unique_ptr<core::LlmClient> llm,
-             std::unique_ptr<core::IoBridge> io,
              std::unique_ptr<core::MemoryStore> memory,
              std::unique_ptr<core::AuditSink> audit);
 
@@ -47,8 +47,10 @@ class CoreDevice : public io::IoDevice {
  private:
   static constexpr char kTextIn[] = "text_in";
   static constexpr char kToolResultIn[] = "tool_result_in";
+  static constexpr char kVadIn[] = "vad_in";
   static constexpr char kTextOut[] = "text_out";
   static constexpr char kActionOut[] = "action_out";
+  static constexpr char kControlOut[] = "control_out";
 
   void EmitFrame(const std::string& port_name, io::DataFrame frame);
 

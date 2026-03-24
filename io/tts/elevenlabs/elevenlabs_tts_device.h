@@ -48,8 +48,9 @@ class ElevenLabsTtsDevice : public TtsDevice {
   void WorkerLoop();
   void Synthesize(const std::string& text);
 
-  static constexpr char kTextIn[]   = "text_in";
-  static constexpr char kAudioOut[] = "audio_out";
+  static constexpr char kTextIn[]    = "text_in";
+  static constexpr char kAudioOut[]  = "audio_out";
+  static constexpr char kControlIn[] = "control_in";
 
   std::string device_id_;
   std::unique_ptr<services::TtsClient> client_;

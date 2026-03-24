@@ -52,8 +52,9 @@ class BaiduAsrDevice : public AsrDevice {
   void WorkerLoop();
   void Transcribe(std::vector<uint8_t> audio);
 
-  static constexpr char kAudioIn[] = "audio_in";
-  static constexpr char kTextOut[] = "text_out";
+  static constexpr char kAudioIn[]   = "audio_in";
+  static constexpr char kTextOut[]   = "text_out";
+  static constexpr char kControlIn[] = "control_in";
 
   std::string device_id_;
   services::BaiduConfig config_;

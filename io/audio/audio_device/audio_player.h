@@ -21,6 +21,10 @@ class AudioPlayer {
   virtual void Stop() = 0;
   [[nodiscard]] virtual bool IsPlaying() const = 0;
 
+  // Discard all buffered audio immediately (e.g. on interrupt).
+  // The stream stays open and ready to accept new audio.
+  virtual void Flush() = 0;
+
   // Write one audio frame into the playout buffer.
   // Returns the number of samples per channel actually written.
   virtual size_t Write(const AudioFrame& frame) = 0;

@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "async_logger.h"
+#include "io/control_frame.h"
 
 namespace shizuru::io {
 
@@ -31,13 +32,19 @@ std::string ElevenLabsTtsDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> ElevenLabsTtsDevice::GetPortDescriptors() const {
   return {
-      {kTextIn,   PortDirection::kInput,  "text/plain"},
-      {kAudioOut, PortDirection::kOutput, "audio/pcm"},
+      {kTextIn,    PortDirection::kInput,  "text/plain"},
+      {kAudioOut,  PortDirection::kOutput, "audio/pcm"},
+      {kControlIn, PortDirection::kInput,  "control/command"},
   };
 }
 
 // Non-blocking: post text to the worker thread instead of joining inline.
 void ElevenLabsTtsDevice::OnInput(const std::string& port_name, DataFrame frame) {
+  if (port_name == kControlIn) {
+    const std::string cmd = ControlFrame::Parse(frame);
+    if (cmd == ControlFrame::kCommandCancel) { CancelSynthesis(); }
+    return;
+  }
   if (!active_.load()) { return; }
   if (port_name != kTextIn) {
     LOG_WARN("ElevenLabsTtsDevice: unsupported input port: {}", port_name);
@@ -105,14 +112,38 @@ void ElevenLabsTtsDevice::WorkerLoop() {
 }
 
 void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
-  uint8_t carry     = 0;
-  bool    has_carry = false;
+  // carry: holds a leftover byte when the HTTP chunk has odd length.
+  // s16le PCM requires 2-byte alignment; we buffer the stray byte and
+  // prepend it to the next chunk so every emitted payload is even-sized.
+  uint8_t carry      = 0;
+  bool    has_carry  = false;
 
   auto emit = [&](const uint8_t* buf, size_t byte_count) {
     if (byte_count == 0) { return; }
+
+    // Assemble aligned data: [carry?] + buf[0..byte_count)
+    const size_t total = (has_carry ? 1 : 0) + byte_count;
+    const size_t emit_bytes = total & ~size_t{1};  // round down to even
+    const size_t new_carry  = total - emit_bytes;   // 0 or 1
+
+    if (emit_bytes == 0) {
+      // Only 1 byte total — stash it and wait for more.
+      carry     = has_carry ? carry : buf[0];
+      has_carry = true;
+      return;
+    }
+
     DataFrame frame;
     frame.type          = "audio/pcm";
-    frame.payload.assign(buf, buf + byte_count);
+    frame.payload.reserve(emit_bytes);
+    if (has_carry) { frame.payload.push_back(carry); }
+    const size_t from_buf = emit_bytes - (has_carry ? 1 : 0);
+    frame.payload.insert(frame.payload.end(), buf, buf + from_buf);
+
+    // Update carry state.
+    has_carry = (new_carry == 1);
+    if (has_carry) { carry = buf[byte_count - 1]; }
+
     frame.source_device = device_id_;
     frame.source_port   = kAudioOut;
     frame.timestamp     = std::chrono::steady_clock::now();
@@ -127,25 +158,7 @@ void ElevenLabsTtsDevice::Synthesize(const std::string& text) {
   try {
     client_->Synthesize(text, [&](const void* data, size_t bytes) {
       if (!active_.load() || bytes == 0) { return; }
-
-      const auto* src = static_cast<const uint8_t*>(data);
-      size_t offset = 0;
-
-      if (has_carry) {
-        uint8_t pair[2] = {carry, src[0]};
-        emit(pair, 2);
-        has_carry = false;
-        offset = 1;
-      }
-
-      const size_t remaining = bytes - offset;
-      const size_t aligned   = (remaining / sizeof(int16_t)) * sizeof(int16_t);
-      emit(src + offset, aligned);
-
-      if (remaining % sizeof(int16_t) != 0) {
-        carry     = src[offset + aligned];
-        has_carry = true;
-      }
+      emit(static_cast<const uint8_t*>(data), bytes);
     });
   } catch (const std::exception& e) {
     LOG_ERROR("ElevenLabsTtsDevice: synthesis error: {}", e.what());

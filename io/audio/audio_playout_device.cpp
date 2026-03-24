@@ -6,6 +6,8 @@
 #include <string>
 #include <utility>
 
+#include "io/control_frame.h"
+
 namespace shizuru::io {
 
 AudioPlayoutDevice::AudioPlayoutDevice(std::unique_ptr<AudioPlayer> player,
@@ -15,11 +17,19 @@ AudioPlayoutDevice::AudioPlayoutDevice(std::unique_ptr<AudioPlayer> player,
 std::string AudioPlayoutDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> AudioPlayoutDevice::GetPortDescriptors() const {
-  return {{kAudioIn, PortDirection::kInput, "audio/pcm"}};
+  return {
+      {kAudioIn,   PortDirection::kInput, "audio/pcm"},
+      {kControlIn, PortDirection::kInput, "control/command"},
+  };
 }
 
 void AudioPlayoutDevice::OnInput(const std::string& port_name,
                                   DataFrame frame) {
+  if (port_name == kControlIn) {
+    const std::string cmd = ControlFrame::Parse(frame);
+    if (cmd == ControlFrame::kCommandCancel) { player_->Flush(); }
+    return;
+  }
   if (port_name != kAudioIn) { return; }
   if (frame.payload.empty()) { return; }
 

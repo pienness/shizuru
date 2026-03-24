@@ -1,39 +1,51 @@
 #include "vad_event_device.h"
 
-#include <string_view>
+#include <chrono>
 #include <utility>
+
+#include "async_logger.h"
 
 namespace shizuru::io {
 
-VadEventDevice::VadEventDevice(EventCallback on_event,
-                               std::vector<std::string> trigger_events,
-                               std::string device_id)
-    : device_id_(std::move(device_id)),
-      on_event_(std::move(on_event)),
-      trigger_events_(std::move(trigger_events)) {}
+VadEventDevice::VadEventDevice(std::string device_id)
+    : device_id_(std::move(device_id)) {}
 
 std::string VadEventDevice::GetDeviceId() const { return device_id_; }
 
 std::vector<PortDescriptor> VadEventDevice::GetPortDescriptors() const {
-  return {{kVadIn, PortDirection::kInput, "vad/event"}};
+  return {
+      {kVadIn,  PortDirection::kInput,  "vad/event"},
+      {kVadOut, PortDirection::kOutput, "vad/event"},
+  };
 }
 
 void VadEventDevice::OnInput(const std::string& port_name, DataFrame frame) {
   if (port_name != kVadIn) { return; }
 
-  const std::string_view json(
-      reinterpret_cast<const char*>(frame.payload.data()),
-      frame.payload.size());
+  const std::string event(frame.payload.begin(), frame.payload.end());
+  LOG_INFO("VadEventDevice: received event '{}'", event);
 
-  for (const auto& event : trigger_events_) {
-    if (json.find(event) != std::string_view::npos) {
-      if (on_event_) { on_event_(event); }
-      return;
-    }
+  if (!output_cb_) {
+    LOG_WARN("VadEventDevice: no output_cb, dropping event '{}'", event);
+    return;
   }
+
+  // Re-emit the event payload on vad_out.
+  DataFrame out;
+  out.type           = "vad/event";
+  out.payload        = frame.payload;
+  out.source_device  = device_id_;
+  out.source_port    = kVadOut;
+  out.timestamp      = std::chrono::steady_clock::now();
+
+  output_cb_(device_id_, kVadOut, std::move(out));
+  LOG_DEBUG("VadEventDevice: emitted '{}' on vad_out", event);
 }
 
-void VadEventDevice::SetOutputCallback(OutputCallback /*cb*/) {}
+void VadEventDevice::SetOutputCallback(OutputCallback cb) {
+  output_cb_ = std::move(cb);
+}
+
 void VadEventDevice::Start() {}
 void VadEventDevice::Stop() {}
 

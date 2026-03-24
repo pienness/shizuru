@@ -79,6 +79,11 @@ class PaPlayer : public AudioPlayer {
     return buf_.Write(frame.data, frame.sample_count);
   }
 
+  void Flush() override {
+    buf_.Reset();
+    ResetLatencyCounters();
+  }
+
   [[nodiscard]] size_t Buffered() const override { return buf_.AvailableRead(); }
 
   // Returns the playout latency: time from first Write() to first callback

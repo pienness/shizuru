@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -9,7 +10,6 @@
 #include "controller/controller.h"
 #include "controller/types.h"
 #include "interfaces/audit_sink.h"
-#include "interfaces/io_bridge.h"
 #include "interfaces/llm_client.h"
 #include "interfaces/memory_store.h"
 #include "policy/config.h"
@@ -26,7 +26,8 @@ class AgentSession {
                ContextConfig ctx_config,
                PolicyConfig pol_config,
                std::unique_ptr<LlmClient> llm,
-               std::unique_ptr<IoBridge> io,
+               Controller::EmitFrameCallback emit_frame,
+               Controller::CancelCallback cancel,
                std::unique_ptr<MemoryStore> memory,
                std::unique_ptr<AuditSink> audit);
 

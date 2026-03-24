@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "async_logger.h"
+#include "io/data_frame.h"
 
 namespace shizuru::core {
 
@@ -56,13 +57,15 @@ const std::unordered_map<std::pair<State, Event>, State, PairHash>
 Controller::Controller(std::string session_id,
                        ControllerConfig config,
                        std::unique_ptr<LlmClient> llm,
-                       std::unique_ptr<IoBridge> io,
+                       EmitFrameCallback emit_frame,
+                       CancelCallback cancel,
                        ContextStrategy& context,
                        PolicyLayer& policy)
     : session_id_(std::move(session_id)),
       config_(std::move(config)),
       llm_(std::move(llm)),
-      io_(std::move(io)),
+      emit_frame_(std::move(emit_frame)),
+      cancel_(std::move(cancel)),
       context_(context),
       policy_(policy) {}
 
@@ -182,6 +185,13 @@ void Controller::RunLoop() {
       HandleInterrupt();
       // Re-enqueue the observation to process after transitioning to Listening.
       EnqueueObservation(std::move(obs));
+      continue;
+    }
+
+    // kToolResult branch: resume from kActing when a tool result arrives.
+    if (state_.load() == State::kActing &&
+        obs.type == ObservationType::kToolResult) {
+      HandleActingResult(obs);
       continue;
     }
 
@@ -328,15 +338,13 @@ void Controller::HandleRouting(ActionCandidate ac) {
   }
 }
 
-// Execute IO action, record result, transition back to Thinking.
+// Emit action/tool_call frame non-blocking; store pending state for HandleActingResult.
 void Controller::HandleActing(ActionCandidate ac) {
   action_count_++;
-  LOG_INFO("[{}] Acting: tool=\"{}\" call_id=\"{}\" args={}",
-           MODULE_NAME, ac.action_name, ac.response_text, ac.arguments);
+  LOG_INFO("[{}] Acting: tool=\"{}\" args={}",
+           MODULE_NAME, ac.action_name, ac.arguments);
 
-  // Record the assistant's tool call decision.
-  // ac.response_text holds the LLM-assigned tool_call_id (set in json_parser).
-  // ac.arguments is already a serialized JSON string from the LLM.
+  // Record the assistant's tool call decision in memory.
   const std::string& tc_id =
       ac.response_text.empty() ? ac.action_name : ac.response_text;
   std::string tc_json =
@@ -353,37 +361,47 @@ void Controller::HandleActing(ActionCandidate ac) {
   call_entry.timestamp = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, call_entry);
 
-  auto result = io_->Execute(ac);
+  // Store pending state so HandleActingResult can reference it.
+  pending_tool_call_id_ = tc_id;
+  pending_action_ = ac;
 
-  if (result.success) {
-    LOG_INFO("[{}] Tool result: tool=\"{}\" output={}",
-             MODULE_NAME, ac.action_name, result.output);
-  } else {
-    LOG_WARN("[{}] Tool failed: tool=\"{}\" error=\"{}\"",
-             MODULE_NAME, ac.action_name, result.error_message);
+  // Serialize ActionCandidate to "<name>:<args>" payload and emit non-blocking.
+  const std::string payload_str = ac.action_name + ":" + ac.arguments;
+  io::DataFrame frame;
+  frame.type = "action/tool_call";
+  frame.payload = std::vector<uint8_t>(payload_str.begin(), payload_str.end());
+  frame.timestamp = std::chrono::steady_clock::now();
+
+  if (emit_frame_) {
+    emit_frame_("action_out", std::move(frame));
   }
 
-  // Record the tool result. Use ac.response_text as the tool_call_id so OpenAI
-  // can pair the tool result with the assistant's tool call above.
+  // Return immediately — RunLoop re-enters queue_cv_.wait loop.
+  // HandleActingResult will be called when kToolResult observation arrives.
+}
+
+// Process tool result received while in kActing state.
+void Controller::HandleActingResult(const Observation& obs) {
+  const bool success = obs.content.find(R"("success":true)") != std::string::npos;
+
   MemoryEntry result_entry;
-  result_entry.type = MemoryEntryType::kToolResult;
-  result_entry.role = "tool";
-  result_entry.content = result.success ? result.output : result.error_message;
-  result_entry.tool_call_id = ac.response_text.empty() ? ac.action_name : ac.response_text;
-  result_entry.timestamp = std::chrono::steady_clock::now();
+  result_entry.type        = MemoryEntryType::kToolResult;
+  result_entry.role        = "tool";
+  result_entry.content     = obs.content;
+  result_entry.tool_call_id = pending_tool_call_id_;
+  result_entry.timestamp   = std::chrono::steady_clock::now();
   context_.RecordTurn(session_id_, result_entry);
 
-  if (result.success) {
-    TryTransition(Event::kActionComplete);
-  } else {
-    TryTransition(Event::kActionFailed);
-  }
+  PolicyResult audit_result;
+  audit_result.outcome = success ? PolicyOutcome::kAllow : PolicyOutcome::kDeny;
+  audit_result.reason  = success ? "tool succeeded" : "tool failed";
+  policy_.AuditAction(session_id_, pending_action_, audit_result);
 
-  // Use kContinuation so BuildContext does not re-append the tool result as a
-  // duplicate current observation (it is already in memory above).
+  TryTransition(success ? Event::kActionComplete : Event::kActionFailed);
+
   Observation continuation;
-  continuation.type = ObservationType::kContinuation;
-  continuation.source = "controller";
+  continuation.type      = ObservationType::kContinuation;
+  continuation.source    = "controller";
   continuation.timestamp = std::chrono::steady_clock::now();
   HandleThinking(continuation);
 }
@@ -451,7 +469,7 @@ bool Controller::CheckBudget() {
 void Controller::HandleInterrupt() {
   LOG_WARN("[{}] Interrupt received in state {}", MODULE_NAME, StateName(state_.load()));
   llm_->Cancel();
-  io_->Cancel();
+  if (cancel_) cancel_();
 
   // Record partial results as MemoryEntry.
   MemoryEntry interrupt_entry;
@@ -465,6 +483,22 @@ void Controller::HandleInterrupt() {
 
   EmitDiagnostic("Turn interrupted in state " +
                  std::to_string(static_cast<int>(state_.load())));
+}
+
+// Public thread-safe interrupt — enqueues a synthetic kUserMessage so RunLoop
+// picks it up and calls HandleInterrupt() on the loop thread.
+void Controller::Interrupt() {
+  State current = state_.load();
+  if (current != State::kThinking && current != State::kRouting &&
+      current != State::kActing) {
+    return;  // Not in an interruptible state — no-op.
+  }
+  Observation obs;
+  obs.type      = ObservationType::kUserMessage;
+  obs.content   = "";
+  obs.source    = "interrupt";
+  obs.timestamp = std::chrono::steady_clock::now();
+  EnqueueObservation(std::move(obs));
 }
 
 }  // namespace shizuru::core

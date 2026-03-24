@@ -26,7 +26,8 @@ class AudioPlayoutDevice : public IoDevice {
   void Stop() override;
 
  private:
-  static constexpr char kAudioIn[] = "audio_in";
+  static constexpr char kAudioIn[]   = "audio_in";
+  static constexpr char kControlIn[] = "control_in";
 
   std::string device_id_;
   std::unique_ptr<AudioPlayer> player_;

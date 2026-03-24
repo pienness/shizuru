@@ -1,7 +1,5 @@
 #pragma once
 
-#include <functional>
-#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -9,27 +7,17 @@
 
 namespace shizuru::io {
 
-// VadEventDevice — fires a callback when a specific VAD event is received.
+// VadEventDevice — forwards VAD events as vad/event DataFrames on vad_out.
 //
 // Port contract:
-//   Input  "vad_in" — vad/event DataFrames from EnergyVadDevice
-//   (no output ports)
+//   Input  "vad_in"  — vad/event DataFrames from EnergyVadDevice
+//   Output "vad_out" — vad/event DataFrames (payload = raw event name bytes)
 //
-// The trigger_events list controls which event strings fire the callback.
-// Defaults to {"speech_end"}.
-//
-// Example uses:
-//   - Trigger ASR flush on speech_end
-//   - Start a recording indicator on speech_start
-//   - Any other side-effect that should be driven by VAD state changes
+// Every event received on vad_in is re-emitted on vad_out unchanged.
+// Downstream devices (e.g. CoreDevice) decide which events to act on.
 class VadEventDevice : public IoDevice {
  public:
-  using EventCallback = std::function<void(const std::string& event)>;
-
-  explicit VadEventDevice(
-      EventCallback on_event,
-      std::vector<std::string> trigger_events = {"speech_end"},
-      std::string device_id = "vad_event");
+  explicit VadEventDevice(std::string device_id = "vad_event");
 
   std::string GetDeviceId() const override;
   std::vector<PortDescriptor> GetPortDescriptors() const override;
@@ -38,12 +26,12 @@ class VadEventDevice : public IoDevice {
   void Start() override;
   void Stop() override;
 
-  static constexpr char kVadIn[] = "vad_in";
+  static constexpr char kVadIn[]  = "vad_in";
+  static constexpr char kVadOut[] = "vad_out";
 
  private:
   std::string device_id_;
-  EventCallback on_event_;
-  std::vector<std::string> trigger_events_;
+  OutputCallback output_cb_;
 };
 
 }  // namespace shizuru::io
