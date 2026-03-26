@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "async_logger.h"
+#include "io/control_frame.h"
 #include "llm/openai/openai_client.h"
 #include "memory/in_memory_store.h"
 #include "audit/log_audit_sink.h"
@@ -142,31 +143,48 @@ std::string AgentRuntime::StartSession() {
 
     route_table_.AddRoute(PortAddress{"core", "text_out"},
                           PortAddress{"app_output", "text_in"},
-                          RouteOptions{.requires_control_plane = false});
+                          RouteOptions{false});
 
     // Tool call async round-trip routes (Requirements 4.2, 4.3).
     route_table_.AddRoute(PortAddress{"core", "action_out"},
                           PortAddress{"tool_dispatch", "action_in"},
-                          RouteOptions{.requires_control_plane = true});
+                          RouteOptions{true});
+    // Fan-out: also notify the app layer about tool calls.
+    route_table_.AddRoute(PortAddress{"core", "action_out"},
+                          PortAddress{"app_tool_call", "action_in"},
+                          RouteOptions{true});
     route_table_.AddRoute(PortAddress{"tool_dispatch", "result_out"},
                           PortAddress{"core", "tool_result_in"},
-                          RouteOptions{.requires_control_plane = true});
+                          RouteOptions{true});
 
     // VAD event route: DMA path (Requirement 8.6).
     route_table_.AddRoute(PortAddress{"vad_event", "vad_out"},
                           PortAddress{"core", "vad_in"},
-                          RouteOptions{.requires_control_plane = false});
+                          RouteOptions{false});
 
     // Control plane routes to IO devices (Requirement 8.7).
     route_table_.AddRoute(PortAddress{"core", "control_out"},
                           PortAddress{"baidu_asr", "control_in"},
-                          RouteOptions{.requires_control_plane = true});
+                          RouteOptions{true});
     route_table_.AddRoute(PortAddress{"core", "control_out"},
                           PortAddress{"elevenlabs_tts", "control_in"},
-                          RouteOptions{.requires_control_plane = true});
+                          RouteOptions{true});
     route_table_.AddRoute(PortAddress{"core", "control_out"},
                           PortAddress{"audio_playout", "control_in"},
-                          RouteOptions{.requires_control_plane = true});
+                          RouteOptions{true});
+  }
+
+  // Register state-change callback on the Controller before starting.
+  if (state_cb_) {
+    core_device_->Session().GetController().OnTransition(
+        [this](core::State /*from*/, core::State to, core::Event /*event*/) {
+          StateChangeCallback cb;
+          {
+            std::lock_guard<std::mutex> lock(output_cb_mutex_);
+            cb = state_cb_;
+          }
+          if (cb) { cb(to); }
+        });
   }
 
   // Start all devices (outside the lock — Start() may call back into DispatchFrame).
@@ -205,6 +223,46 @@ void AgentRuntime::SendMessage(const std::string& content) {
 void AgentRuntime::OnOutput(OutputCallback cb) {
   std::lock_guard<std::mutex> lock(output_cb_mutex_);
   output_cb_ = std::move(cb);
+}
+
+void AgentRuntime::OnStateChange(StateChangeCallback cb) {
+  std::lock_guard<std::mutex> lock(output_cb_mutex_);
+  state_cb_ = std::move(cb);
+}
+
+void AgentRuntime::OnToolCall(ToolCallCallback cb) {
+  std::lock_guard<std::mutex> lock(output_cb_mutex_);
+  tool_call_cb_ = std::move(cb);
+}
+
+void AgentRuntime::SpeakText(const std::string& text) {
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+  // Look for any TTS device by checking known IDs.
+  for (const char* tts_id : {"elevenlabs_tts", "baidu_tts"}) {
+    auto it = devices_.find(tts_id);
+    if (it != devices_.end()) {
+      io::DataFrame frame;
+      frame.type = "text/plain";
+      frame.payload = std::vector<uint8_t>(text.begin(), text.end());
+      frame.source_device = "app";
+      frame.source_port = "text_out";
+      frame.timestamp = std::chrono::steady_clock::now();
+      it->second->OnInput("text_in", std::move(frame));
+      return;
+    }
+  }
+  LOG_WARN("[{}] SpeakText: no TTS device registered", MODULE_NAME);
+}
+
+void AgentRuntime::StopSpeaking() {
+  std::shared_lock<std::shared_mutex> lock(devices_mutex_);
+  // Send cancel control frame to TTS and playout devices.
+  for (const char* dev_id : {"elevenlabs_tts", "baidu_tts", "audio_playout"}) {
+    auto it = devices_.find(dev_id);
+    if (it != devices_.end()) {
+      it->second->OnInput("control_in", io::ControlFrame::Make("cancel"));
+    }
+  }
 }
 
 void AgentRuntime::Shutdown() {
@@ -273,6 +331,25 @@ void AgentRuntime::DispatchFrame(const std::string& device_id,
           cb = output_cb_;
         }
         if (cb) { cb(output); }
+      }
+      continue;
+    }
+
+    // Handle the virtual app_tool_call sink inline.
+    if (dest.device_id == "app_tool_call") {
+      if (frame.type == "action/tool_call") {
+        const std::string payload(frame.payload.begin(), frame.payload.end());
+        const auto colon = payload.find(':');
+        const std::string name = (colon == std::string::npos)
+                                     ? payload : payload.substr(0, colon);
+        const std::string args = (colon == std::string::npos)
+                                     ? "" : payload.substr(colon + 1);
+        ToolCallCallback cb;
+        {
+          std::lock_guard<std::mutex> lock(output_cb_mutex_);
+          cb = tool_call_cb_;
+        }
+        if (cb) { cb(name, args); }
       }
       continue;
     }

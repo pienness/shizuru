@@ -47,6 +47,9 @@ struct RuntimeOutput {
 class AgentRuntime {
  public:
   using OutputCallback = std::function<void(const RuntimeOutput& output)>;
+  using StateChangeCallback = std::function<void(core::State state)>;
+  using ToolCallCallback = std::function<void(const std::string& tool_name,
+                                               const std::string& arguments)>;
 
   AgentRuntime(RuntimeConfig config, services::ToolRegistry& tools);
   ~AgentRuntime();
@@ -79,6 +82,19 @@ class AgentRuntime {
   // Query the current state of the active session.
   core::State GetState() const;
 
+  // Register callback for state changes (called on Controller thread).
+  void OnStateChange(StateChangeCallback cb);
+
+  // Register callback for tool call notifications (called on Controller thread).
+  void OnToolCall(ToolCallCallback cb);
+
+  // Feed text into the TTS device for speech synthesis.
+  // No-op if no TTS device is registered.
+  void SpeakText(const std::string& text);
+
+  // Cancel in-progress TTS and audio playout.
+  void StopSpeaking();
+
   // Check if a session is active.
   bool HasActiveSession() const;
 
@@ -104,6 +120,8 @@ class AgentRuntime {
   mutable std::shared_mutex devices_mutex_;  // protects devices_ and route_table_
   mutable std::mutex output_cb_mutex_;
   OutputCallback output_cb_;
+  StateChangeCallback state_cb_;
+  ToolCallCallback tool_call_cb_;
 };
 
 }  // namespace shizuru::runtime

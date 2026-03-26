@@ -154,7 +154,7 @@ RC_GTEST_PROP(AgentRuntimePropTest, prop_zero_transformation_invariant, ()) {
   RouteTable table;
   table.AddRoute(PortAddress{"src_dev", "src_port"},
                  PortAddress{"dst_dev", "dst_port"},
-                 RouteOptions{.requires_control_plane = false});
+                 RouteOptions{false});
 
   auto dst = std::make_unique<MockIoDevice>("dst_dev");
   MockIoDevice* dst_ptr = dst.get();

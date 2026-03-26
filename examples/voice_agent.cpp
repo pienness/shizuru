@@ -199,7 +199,7 @@ int main(int argc, char* argv[]) {
   runtime.RegisterDevice(std::move(playout));
 
   // ── Routes (all DMA — requires_control_plane = false) ────────────────────
-  constexpr runtime::RouteOptions kDma{.requires_control_plane = false};
+  constexpr runtime::RouteOptions kDma{false};
 
   // capture → dump → vad
   runtime.AddRoute({"audio_capture", "audio_out"},

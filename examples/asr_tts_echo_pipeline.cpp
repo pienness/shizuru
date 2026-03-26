@@ -70,7 +70,7 @@ class SimpleBus {
   }
 
   void AddRoute(const runtime::PortAddress& src, runtime::PortAddress dst) {
-    table_.AddRoute(src, std::move(dst), {.requires_control_plane = false});
+    table_.AddRoute(src, std::move(dst), {false});
   }
 
   void Start() { for (auto& [id, dev] : devices_) { dev->Start(); } }

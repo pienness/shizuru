@@ -251,7 +251,7 @@ TEST(AgentRuntimeTest, DmaPathDeliversFrameDirectly) {
   // DMA route: requires_control_plane = false
   runtime.AddRoute(PortAddress{"src", "audio_out"},
                    PortAddress{"dst", "audio_in"},
-                   RouteOptions{.requires_control_plane = false});
+                   RouteOptions{false});
 
   src_ptr->Start();
   dst_ptr->Start();
