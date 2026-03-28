@@ -54,10 +54,11 @@ class _AppStartupState extends State<_AppStartup> {
   Future<void> _startup() async {
     final prefs = await SharedPreferences.getInstance();
 
-    final llmApiKey      = prefs.getString('llm_api_key') ?? '';
-    final elevenLabsKey  = prefs.getString('elevenlabs_api_key') ?? '';
-    final baiduApiKey    = prefs.getString('baidu_api_key') ?? '';
-    final baiduSecretKey = prefs.getString('baidu_secret_key') ?? '';
+    final d = BridgeConfig.defaults();
+    final llmApiKey      = prefs.getString('llm_api_key')        ?? d.llmApiKey;
+    final elevenLabsKey  = prefs.getString('elevenlabs_api_key') ?? d.elevenLabsApiKey;
+    final baiduApiKey    = prefs.getString('baidu_api_key')       ?? d.baiduApiKey;
+    final baiduSecretKey = prefs.getString('baidu_secret_key')    ?? d.baiduSecretKey;
 
     final configComplete = llmApiKey.isNotEmpty &&
         elevenLabsKey.isNotEmpty &&

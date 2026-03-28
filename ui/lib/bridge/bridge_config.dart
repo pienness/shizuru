@@ -28,12 +28,12 @@ class BridgeConfig {
   factory BridgeConfig.defaults() => const BridgeConfig(
     llmBaseUrl: 'https://dashscope.aliyuncs.com',
     llmApiPath: '/compatible-mode/v1/chat/completions',
-    llmApiKey: '',
+    llmApiKey: 'sk-a3a4025e1fd24ac8a609b12bf9a75b63',
     llmModel: 'qwen3-coder-next',
-    elevenLabsApiKey: '',
+    elevenLabsApiKey: 'sk_93e5bcaa7fb05e682c29261db7f2903876dd5199acfdca12',
     elevenLabsVoiceId: '',
-    baiduApiKey: '',
-    baiduSecretKey: '',
+    baiduApiKey: 'tao8dVRnhu1We1dZozLAHdwB',
+    baiduSecretKey: 'RgRHkQ92jZjPuBNY4GKL9UBP9VoJhUkc',
     systemInstruction:
         'You are a helpful voice assistant. Keep responses concise and natural '
         'for speech. Avoid markdown formatting.',

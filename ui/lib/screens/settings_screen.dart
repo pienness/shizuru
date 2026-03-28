@@ -35,12 +35,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     final d = BridgeConfig.defaults();
     _llmBaseUrl        = TextEditingController(text: d.llmBaseUrl);
     _llmApiPath        = TextEditingController(text: d.llmApiPath);
-    _llmApiKey         = TextEditingController();
+    _llmApiKey         = TextEditingController(text: d.llmApiKey);
     _llmModel          = TextEditingController(text: d.llmModel);
-    _elevenLabsApiKey  = TextEditingController();
-    _elevenLabsVoiceId = TextEditingController();
-    _baiduApiKey       = TextEditingController();
-    _baiduSecretKey    = TextEditingController();
+    _elevenLabsApiKey  = TextEditingController(text: d.elevenLabsApiKey);
+    _elevenLabsVoiceId = TextEditingController(text: d.elevenLabsVoiceId);
+    _baiduApiKey       = TextEditingController(text: d.baiduApiKey);
+    _baiduSecretKey    = TextEditingController(text: d.baiduSecretKey);
     _systemInstruction = TextEditingController(text: d.systemInstruction);
     _maxTurns          = TextEditingController(text: d.maxTurns.toString());
     _loadSaved();
@@ -51,12 +51,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
     setState(() {
       _llmBaseUrl.text        = prefs.getString('llm_base_url')        ?? _llmBaseUrl.text;
       _llmApiPath.text        = prefs.getString('llm_api_path')        ?? _llmApiPath.text;
-      _llmApiKey.text         = prefs.getString('llm_api_key')         ?? '';
+      _llmApiKey.text         = prefs.getString('llm_api_key')         ?? _llmApiKey.text;
       _llmModel.text          = prefs.getString('llm_model')           ?? _llmModel.text;
-      _elevenLabsApiKey.text  = prefs.getString('elevenlabs_api_key')  ?? '';
-      _elevenLabsVoiceId.text = prefs.getString('elevenlabs_voice_id') ?? '';
-      _baiduApiKey.text       = prefs.getString('baidu_api_key')       ?? '';
-      _baiduSecretKey.text    = prefs.getString('baidu_secret_key')    ?? '';
+      _elevenLabsApiKey.text  = prefs.getString('elevenlabs_api_key')  ?? _elevenLabsApiKey.text;
+      _elevenLabsVoiceId.text = prefs.getString('elevenlabs_voice_id') ?? _elevenLabsVoiceId.text;
+      _baiduApiKey.text       = prefs.getString('baidu_api_key')       ?? _baiduApiKey.text;
+      _baiduSecretKey.text    = prefs.getString('baidu_secret_key')    ?? _baiduSecretKey.text;
       _systemInstruction.text = prefs.getString('system_instruction')  ?? _systemInstruction.text;
       _maxTurns.text          = prefs.getString('max_turns')           ?? _maxTurns.text;
     });
